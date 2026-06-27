@@ -1,0 +1,159 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
+
+/// 工程文件扫描服务（对齐 Claude Code 的做法：**不预建语义/向量索引**）。
+///
+/// 代码定位完全交给 Agent 用 grep / glob / read 按需检索（agentic search），
+/// 不再做切块、向量化与相似度检索。本服务只负责两件轻量的事：
+/// - 扫描工程内的代码文件清单（含 mtime），用于"本轮改动了哪些文件"的对比；
+/// - 给 Agent 生成一份顶层工程概览（目录树 + 文件数）作为初始认知。
+class CodeIndexService extends ChangeNotifier {
+  static const _maxFiles = 8000;
+
+  /// 扫描与遍历时跳过的目录（依赖/构建产物/IDE 等噪声）。
+  static const ignoreDirs = {
+    '.git', '.hg', '.svn', 'node_modules', 'build', 'dist', 'out', 'target',
+    '.dart_tool', '.idea', '.vscode', '.gradle', 'bin', 'obj', 'Pods',
+    '.next', '.nuxt', 'coverage', 'venv', '.venv', 'env', '__pycache__',
+    '.pub-cache', 'vendor', '.cache', '.expo', 'DerivedData',
+  };
+
+  static const _codeExts = {
+    '.dart', '.py', '.js', '.jsx', '.ts', '.tsx', '.java', '.kt', '.go',
+    '.rs', '.c', '.h', '.cc', '.cpp', '.hpp', '.cxx', '.cs', '.rb', '.php',
+    '.swift', '.m', '.mm', '.scala', '.sh', '.bash', '.ps1', '.sql', '.r',
+    '.lua', '.vue', '.svelte', '.html', '.css', '.scss', '.less',
+    '.json', '.yaml', '.yml', '.toml', '.ini', '.xml', '.gradle', '.cmake',
+    '.md', '.txt', '.proto', '.graphql', '.tf',
+  };
+
+  Directory? _root;
+  bool scanning = false;
+  int _fileCount = 0;
+
+  /// 是否已绑定工程。
+  bool get bound => _root != null;
+
+  /// 最近一次扫描到的代码文件数。
+  int get fileCount => _fileCount;
+
+  /// 切换当前工程并扫描一次文件清单。
+  Future<void> bind(Directory projectRoot) async {
+    _root = projectRoot;
+    _fileCount = 0;
+    notifyListeners();
+    await rescan();
+  }
+
+  void unbind() {
+    _root = null;
+    _fileCount = 0;
+    scanning = false;
+    notifyListeners();
+  }
+
+  /// 重新扫描工程文件（纯 IO，很快）。
+  Future<void> rescan() async {
+    final root = _root;
+    if (root == null) return;
+    scanning = true;
+    notifyListeners();
+    try {
+      _fileCount = _scanFiles(root).length;
+    } finally {
+      scanning = false;
+      notifyListeners();
+    }
+  }
+
+  /// 扫描工程代码文件，返回 rel -> mtime(ms)，供调用方比对"本轮改动了哪些文件"。
+  Map<String, int> snapshotMtimes() {
+    final root = _root;
+    if (root == null) return const {};
+    return _scanFiles(root);
+  }
+
+  /// 顶层目录树（最多两层）+ 文件统计，作为 Agent 的初始工程概览。
+  String overview() {
+    final root = _root;
+    if (root == null) return '';
+    final buf = StringBuffer();
+    buf.writeln('工程顶层结构：');
+    try {
+      final entries = root.listSync(followLinks: false)
+        ..sort((a, b) {
+          final ad = a is Directory ? 0 : 1;
+          final bd = b is Directory ? 0 : 1;
+          if (ad != bd) return ad - bd;
+          return p.basename(a.path).compareTo(p.basename(b.path));
+        });
+      var shown = 0;
+      for (final e in entries) {
+        final name = p.basename(e.path);
+        if (e is Directory) {
+          if (ignoreDirs.contains(name) || name.startsWith('.')) continue;
+          buf.writeln('  $name/');
+          try {
+            final sub = e.listSync(followLinks: false).take(12);
+            for (final s in sub) {
+              final sn = p.basename(s.path);
+              if (s is Directory && ignoreDirs.contains(sn)) continue;
+              buf.writeln('    $sn${s is Directory ? '/' : ''}');
+            }
+          } catch (_) {}
+        } else {
+          buf.writeln('  $name');
+        }
+        if (++shown >= 40) {
+          buf.writeln('  …');
+          break;
+        }
+      }
+    } catch (_) {}
+    if (_fileCount > 0) {
+      buf.writeln('\n工程共约 $_fileCount 个代码文件。'
+          '定位代码请用 grep（按内容/符号）与 glob（按文件名）检索，'
+          '命中后用 read_file 精读对应区间，**不要逐个文件整读**。');
+    }
+    return buf.toString();
+  }
+
+  Map<String, int> _scanFiles(Directory root) {
+    final out = <String, int>{};
+    void walk(Directory dir) {
+      if (out.length >= _maxFiles) return;
+      List<FileSystemEntity> entries;
+      try {
+        entries = dir.listSync(followLinks: false);
+      } catch (_) {
+        return;
+      }
+      for (final e in entries) {
+        if (out.length >= _maxFiles) return;
+        final name = p.basename(e.path);
+        if (e is Directory) {
+          if (ignoreDirs.contains(name) || name.startsWith('.')) continue;
+          walk(e);
+        } else if (e is File) {
+          final ext = p.extension(name).toLowerCase();
+          if (!_codeExts.contains(ext)) continue;
+          FileStat st;
+          try {
+            st = e.statSync();
+          } catch (_) {
+            continue;
+          }
+          if (st.size == 0) continue;
+          final rel =
+              p.relative(e.path, from: root.path).replaceAll('\\', '/');
+          out[rel] = st.modified.millisecondsSinceEpoch;
+        }
+      }
+    }
+
+    walk(root);
+    return out;
+  }
+}

@@ -1,0 +1,267 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'platform_capabilities.dart';
+
+/// 一个可用于「做实验」的大模型供应商预设。
+class LlmProviderPreset {
+  const LlmProviderPreset({
+    required this.key,
+    required this.name,
+    required this.baseUrl,
+    required this.model,
+    this.builtin = false,
+    this.hint = '',
+  });
+
+  /// 唯一标识（持久化用）。
+  final String key;
+
+  /// 展示名。
+  final String name;
+
+  /// OpenAI 兼容的接口基址（自动拼接 `/chat/completions`）。
+  final String baseUrl;
+
+  /// 默认模型名。
+  final String model;
+
+  /// 是否为项目默认供应商。
+  /// 默认供应商的密钥来自本地环境，不在设置页里保存。
+  final bool builtin;
+
+  /// 申请/文档提示。
+  final String hint;
+}
+
+class SettingsService extends ChangeNotifier {
+  late SharedPreferences _prefs;
+
+  static const _desktopDefaultVault = r'D:\我的大脑';
+
+  // DeepSeek 密钥不应写进源码。
+  // 本地 run / build 脚本会读取 .env，并通过 --dart-define 注入这里。
+  static const _apiKey = String.fromEnvironment('DEEPSEEK_API_KEY');
+  static const _baseUrl = String.fromEnvironment(
+    'DEEPSEEK_BASE_URL',
+    defaultValue: 'https://api.deepseek.com',
+  );
+  static const _model = String.fromEnvironment(
+    'DEEPSEEK_MODEL',
+    defaultValue: 'deepseek-v4-flash',
+  );
+
+  /// 「做实验」可选的大模型供应商。默认仍为 DeepSeek，
+  /// MiniMax / GLM / Qwen / Kimi 需用户在设置里填入各自的 API Key 后方可选用。
+  static const List<LlmProviderPreset> experimentProviders = [
+    LlmProviderPreset(
+      key: 'deepseek',
+      name: 'DeepSeek（本地环境）',
+      baseUrl: _baseUrl,
+      model: _model,
+      builtin: true,
+    ),
+    LlmProviderPreset(
+      key: 'minimax',
+      name: 'MiniMax',
+      baseUrl: 'https://api.minimaxi.com/v1',
+      model: 'MiniMax-Text-01',
+      hint: '在 MiniMax 开放平台创建 API Key。',
+    ),
+    LlmProviderPreset(
+      key: 'glm',
+      name: '智谱 GLM',
+      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      model: 'glm-4-plus',
+      hint: '在智谱 AI 开放平台（bigmodel.cn）创建 API Key。',
+    ),
+    LlmProviderPreset(
+      key: 'qwen',
+      name: '通义千问 Qwen',
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      model: 'qwen-plus',
+      hint: '在阿里云百炼 DashScope 控制台创建 API Key。',
+    ),
+    LlmProviderPreset(
+      key: 'kimi',
+      name: 'Kimi（Moonshot）',
+      baseUrl: 'https://api.moonshot.cn/v1',
+      model: 'moonshot-v1-32k',
+      hint: '在 Moonshot 开放平台（platform.moonshot.cn）创建 API Key。',
+    ),
+  ];
+
+  static LlmProviderPreset presetFor(String key) => experimentProviders
+      .firstWhere((p) => p.key == key, orElse: () => experimentProviders.first);
+
+  Future<void> init() async {
+    _prefs = await SharedPreferences.getInstance();
+    if (!_prefs.containsKey('vaultPath')) {
+      final path = await _initialVaultPath();
+      await Directory(path).create(recursive: true);
+      await _prefs.setString('vaultPath', path);
+    }
+  }
+
+  Future<String> _initialVaultPath() async {
+    if (PlatformCapabilities.isMobile) {
+      final dir = await getApplicationDocumentsDirectory();
+      return p.join(dir.path, '我的大脑');
+    }
+    if (!kIsWeb && Platform.isWindows && await Directory(r'D:\').exists()) {
+      return _desktopDefaultVault;
+    }
+    final home =
+        Platform.environment['USERPROFILE'] ?? Platform.environment['HOME'];
+    if (home != null && home.trim().isNotEmpty) {
+      return p.join(home, '我的大脑');
+    }
+    final dir = await getApplicationDocumentsDirectory();
+    return p.join(dir.path, '我的大脑');
+  }
+
+  String get vaultPath => _prefs.getString('vaultPath') ?? _desktopDefaultVault;
+
+  // 默认（DeepSeek）配置：研究 / 对话 / 知识库等全部沿用，不受实验模型选择影响。
+  String get apiKey => _apiKey;
+  String get baseUrl => _baseUrl;
+  String get model => _model;
+
+  // ---------------------------------------------------------------------------
+  // 「做实验」专用的大模型供应商配置
+  // ---------------------------------------------------------------------------
+
+  /// 当前用于做实验的供应商 key，默认使用本地环境注入的 DeepSeek。
+  String get experimentProvider =>
+      _prefs.getString('experimentProvider') ?? 'deepseek';
+
+  String providerApiKey(String key) {
+    if (key == 'deepseek') return _apiKey;
+    return (_prefs.getString('llm_${key}_apiKey') ?? '').trim();
+  }
+
+  String providerBaseUrl(String key) {
+    if (key == 'deepseek') return _baseUrl;
+    final v = (_prefs.getString('llm_${key}_baseUrl') ?? '').trim();
+    return v.isNotEmpty ? v : presetFor(key).baseUrl;
+  }
+
+  String providerModel(String key) {
+    if (key == 'deepseek') return _model;
+    final v = (_prefs.getString('llm_${key}_model') ?? '').trim();
+    return v.isNotEmpty ? v : presetFor(key).model;
+  }
+
+  /// 某供应商是否已就绪。DeepSeek 需要通过 .env 注入 API Key。
+  bool providerReady(String key) => providerApiKey(key).isNotEmpty;
+
+  // 做实验时实际使用的配置（指向所选供应商）。
+  String get experimentApiKey => providerApiKey(experimentProvider);
+  String get experimentBaseUrl => providerBaseUrl(experimentProvider);
+  String get experimentModel => providerModel(experimentProvider);
+
+  Future<void> setExperimentProvider(String key) async {
+    await _prefs.setString('experimentProvider', key);
+    notifyListeners();
+  }
+
+  Future<void> setProviderConfig(
+    String key, {
+    String? apiKey,
+    String? baseUrl,
+    String? model,
+  }) async {
+    if (key == 'deepseek') return; // 内置默认不可改。
+    if (apiKey != null) {
+      await _prefs.setString('llm_${key}_apiKey', apiKey.trim());
+    }
+    if (baseUrl != null) {
+      await _prefs.setString('llm_${key}_baseUrl', baseUrl.trim());
+    }
+    if (model != null) await _prefs.setString('llm_${key}_model', model.trim());
+    notifyListeners();
+  }
+
+  // ---------------------------------------------------------------------------
+  // 工程语义索引（Embedding）配置——用于「项目开发」的代码检索 (RAG)
+  // ---------------------------------------------------------------------------
+
+  static const _embeddingDefaultBaseUrl =
+      'https://dashscope.aliyuncs.com/compatible-mode/v1';
+  static const _embeddingDefaultModel = 'text-embedding-v3';
+
+  bool get embeddingEnabled => _prefs.getBool('embeddingEnabled') ?? true;
+
+  String get embeddingBaseUrl {
+    final v = (_prefs.getString('embeddingBaseUrl') ?? '').trim();
+    return v.isNotEmpty ? v : _embeddingDefaultBaseUrl;
+  }
+
+  String get embeddingApiKey =>
+      (_prefs.getString('embeddingApiKey') ?? '').trim();
+
+  String get embeddingModel {
+    final v = (_prefs.getString('embeddingModel') ?? '').trim();
+    return v.isNotEmpty ? v : _embeddingDefaultModel;
+  }
+
+  /// 是否可用于建索引：已启用且填了 Key。
+  bool get embeddingReady => embeddingEnabled && embeddingApiKey.isNotEmpty;
+
+  Future<void> setEmbeddingConfig({
+    bool? enabled,
+    String? apiKey,
+    String? baseUrl,
+    String? model,
+  }) async {
+    if (enabled != null) await _prefs.setBool('embeddingEnabled', enabled);
+    if (apiKey != null) {
+      await _prefs.setString('embeddingApiKey', apiKey.trim());
+    }
+    if (baseUrl != null) {
+      await _prefs.setString('embeddingBaseUrl', baseUrl.trim());
+    }
+    if (model != null) await _prefs.setString('embeddingModel', model.trim());
+    notifyListeners();
+  }
+
+  // Zotero 本地集成（连接桌面端，无需 API Key）。
+  bool get zoteroEnabled => _prefs.getBool('zoteroEnabled') ?? true;
+  int get zoteroPort => _prefs.getInt('zoteroPort') ?? 23119;
+
+  // Playwright 辅助抓取（更可靠地渲染政策/法规/标准页面并下载 PDF）。
+  bool get playwrightEnabled => _prefs.getBool('playwrightEnabled') ?? true;
+
+  /// 浏览研究模式会打开持久 Playwright 会话，像用户一样搜索、滚动、阅读网页。
+  /// 它依赖设置里的实验/项目大模型做页面理解，默认关闭，避免未配置视觉模型时误用。
+  bool get playwrightBrowserResearchEnabled =>
+      _prefs.getBool('playwrightBrowserResearchEnabled') ?? false;
+
+  Future<void> update({
+    String? vaultPath,
+    bool? zoteroEnabled,
+    int? zoteroPort,
+    bool? playwrightEnabled,
+    bool? playwrightBrowserResearchEnabled,
+  }) async {
+    if (vaultPath != null) await _prefs.setString('vaultPath', vaultPath);
+    if (zoteroEnabled != null) {
+      await _prefs.setBool('zoteroEnabled', zoteroEnabled);
+    }
+    if (zoteroPort != null) await _prefs.setInt('zoteroPort', zoteroPort);
+    if (playwrightEnabled != null) {
+      await _prefs.setBool('playwrightEnabled', playwrightEnabled);
+    }
+    if (playwrightBrowserResearchEnabled != null) {
+      await _prefs.setBool(
+        'playwrightBrowserResearchEnabled',
+        playwrightBrowserResearchEnabled,
+      );
+    }
+    notifyListeners();
+  }
+}
