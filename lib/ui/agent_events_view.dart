@@ -12,6 +12,7 @@ class AgentEventsView extends StatefulWidget {
     this.controller,
     this.padding = const EdgeInsets.fromLTRB(20, 0, 20, 20),
     this.onOpenFile,
+    this.onResend,
   });
 
   final List<AgentEvent> events;
@@ -20,6 +21,10 @@ class AgentEventsView extends StatefulWidget {
 
   /// 点击「改动文件」时回调（传入相对工程根的路径）。
   final void Function(String relPath)? onOpenFile;
+
+  /// 点击用户消息上的「重发」时回调（传入该用户消息事件）。
+  /// 为 null 时不显示重发按钮（例如运行中或不支持重发的场景）。
+  final void Function(AgentEvent userEvent)? onResend;
 
   @override
   State<AgentEventsView> createState() => _AgentEventsViewState();
@@ -181,6 +186,18 @@ class _AgentEventsViewState extends State<AgentEventsView> {
                   ),
                 ),
               ),
+              // 重发按钮：失败或想重试时，按相同消息再跑一次。
+              if (widget.onResend != null)
+                Padding(
+                  padding: const EdgeInsets.only(left: 2),
+                  child: IconButton(
+                    tooltip: '重发',
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(Icons.refresh,
+                        size: 15, color: Color(0xFF6B6B70)),
+                    onPressed: () => widget.onResend!(e),
+                  ),
+                ),
             ],
           ),
         );

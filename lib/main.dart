@@ -67,7 +67,7 @@ Future<void> main() async {
     memory,
   );
   final experiment = ExperimentService(settings, memory);
-  final project = ProjectService(settings, memory);
+  final project = ProjectService(settings, memory, research: topic);
   final document = DocumentService(settings);
   final book = BookService(settings);
   final paper = PaperService(settings);

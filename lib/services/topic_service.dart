@@ -191,6 +191,13 @@ class TopicFetchService extends ChangeNotifier {
   void Function(String line)? _logSink;
   String? _lastReport;
 
+  // 为 true 时，本次 run() 结束不向主题研究历史登记记录（用于"项目内研究"，
+  // 研究会话归项目所有，但报告仍照常存入知识库）。
+  bool _suppressHistory = false;
+
+  /// 最近一次研究产出的报告笔记路径（供调用方关联，如项目会话）。
+  String? get lastReportPath => _pendingReportPath;
+
   /// 研究完成后回调，参数为研究报告笔记的文件路径（用于自动跳转查看）。
   void Function(String reportNotePath)? onResearchComplete;
 
@@ -510,17 +517,20 @@ class TopicFetchService extends ChangeNotifier {
       _log('处理失败：$e');
     } finally {
       running = false;
-      history.insert(
-        0,
-        ResearchRecord(
-          id: DateTime.now().millisecondsSinceEpoch.toString(),
-          topic: researchTitle,
-          createdAt: DateTime.now(),
-          logs: List.of(logs),
-          reportPath: _pendingReportPath,
-        ),
-      );
-      await _persist();
+      // 项目内研究不登记主题研究历史（_suppressHistory），但报告已存知识库。
+      if (!_suppressHistory) {
+        history.insert(
+          0,
+          ResearchRecord(
+            id: DateTime.now().millisecondsSinceEpoch.toString(),
+            topic: researchTitle,
+            createdAt: DateTime.now(),
+            logs: List.of(logs),
+            reportPath: _pendingReportPath,
+          ),
+        );
+        await _persist();
+      }
       notifyListeners();
     }
   }
@@ -532,6 +542,7 @@ class TopicFetchService extends ChangeNotifier {
     String topic, {
     String clarification = '',
     void Function(String line)? log,
+    bool recordInHistory = true,
   }) async {
     if (running) {
       throw StateError('已有主题研究正在进行，请稍后再试');
@@ -539,10 +550,12 @@ class TopicFetchService extends ChangeNotifier {
     final savedCallback = onResearchComplete;
     onResearchComplete = null; // 由 Agent 发起时不联动界面跳转。
     _logSink = log;
+    _suppressHistory = !recordInHistory;
     try {
       await run(topic, clarification: clarification);
     } finally {
       _logSink = null;
+      _suppressHistory = false;
       onResearchComplete = savedCallback;
     }
     final report = _lastReport;

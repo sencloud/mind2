@@ -17,6 +17,10 @@ import 'agent/prompts.dart';
 import 'agent/reporter.dart';
 import 'code_index_service.dart';
 import 'settings_service.dart';
+import 'topic_service.dart';
+
+/// 会话类型：dev=项目开发会话；research=基于会话发起的主题研究会话。
+enum ConvKind { dev, research }
 
 /// 一次项目开发的「对话会话」：包含该次会话的全部运行事件（用户指令、
 /// 助手思考、工具调用等），可落盘持久化并随时加载回来（参考 Cursor 的会话历史）。
@@ -27,6 +31,8 @@ class ProjectConversation {
     required this.createdAt,
     required this.updatedAt,
     required this.events,
+    this.kind = ConvKind.dev,
+    this.researchPath,
   });
 
   final String id;
@@ -35,12 +41,20 @@ class ProjectConversation {
   DateTime updatedAt;
   final List<AgentEvent> events;
 
+  /// 会话类型（开发 / 研究），用于在会话列表上区分与打标。
+  final ConvKind kind;
+
+  /// 研究会话产出的报告笔记路径（仅 research 会话有）。
+  String? researchPath;
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'title': title,
         'createdAt': createdAt.toIso8601String(),
         'updatedAt': updatedAt.toIso8601String(),
         'events': events.map((e) => e.toJson()).toList(),
+        'kind': kind.name,
+        if (researchPath != null) 'researchPath': researchPath,
       };
 
   factory ProjectConversation.fromJson(Map<String, dynamic> j) =>
@@ -55,6 +69,11 @@ class ProjectConversation {
             .whereType<Map>()
             .map((e) => AgentEvent.fromJson(e.cast<String, dynamic>()))
             .toList(),
+        kind: ConvKind.values.firstWhere(
+          (k) => k.name == j['kind'],
+          orElse: () => ConvKind.dev,
+        ),
+        researchPath: j['researchPath'] as String?,
       );
 }
 
@@ -85,9 +104,10 @@ class ProjectLink {
 /// 每个项目维护一组可持久化的对话会话（保存在应用数据目录，按工程路径建键），
 /// 可随时加载历史会话继续查看或开发。
 class ProjectService extends ChangeNotifier {
-  ProjectService(this.settings, this.memory)
+  ProjectService(this.settings, this.memory, {TopicFetchService? research})
       : _model = ModelClient(settings),
-        index = CodeIndexService() {
+        index = CodeIndexService(),
+        _research = research {
     _runner = AgentRunner(model: _model, memory: memory);
   }
 
@@ -95,6 +115,12 @@ class ProjectService extends ChangeNotifier {
   final MemoryService memory;
   final ModelClient _model;
   late final AgentRunner _runner;
+
+  /// 主题研究服务：用于"基于当前会话发起主题研究"，复用同一套研究引擎。
+  final TopicFetchService? _research;
+
+  /// 是否具备发起研究的能力（已接入主题研究服务）。
+  bool get canResearch => _research != null;
 
   /// 当前工程的文件扫描服务（供 UI 显示文件数 / 工程概览 / 改动检测）。
   final CodeIndexService index;
@@ -360,6 +386,176 @@ class ProjectService extends ChangeNotifier {
       conv.updatedAt = DateTime.now();
       await _saveConversations();
       notifyListeners();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 基于当前会话发起主题研究（复用主题研究引擎，研究会话落在项目会话列表）
+  // ---------------------------------------------------------------------------
+
+  /// 把当前会话压成一段简短转写，作为研究背景（需求、已实现要点、改动文件）。
+  String _conversationDigest() {
+    final conv = activeConv;
+    if (conv == null) return '';
+    final buf = StringBuffer();
+    for (final e in conv.events) {
+      switch (e.kind) {
+        case AgentEventKind.user:
+          buf.writeln('[需求] ${_clip(e.text, 400)}');
+        case AgentEventKind.assistant:
+          if (e.text.trim().isNotEmpty) {
+            buf.writeln('[助手] ${_clip(e.text, 400)}');
+          }
+        case AgentEventKind.tool:
+          if (e.title.trim().isNotEmpty) buf.writeln('[操作] ${_clip(e.title, 120)}');
+        case AgentEventKind.changes:
+          buf.writeln('[改动文件] ${e.detail.replaceAll('\n', '、')}');
+        case AgentEventKind.status:
+          break; // 进度行不计入背景。
+      }
+    }
+    return _clip(buf.toString().trim(), 4000);
+  }
+
+  /// 基于当前会话，请模型提一个"值得深入研究的新算法/新思路/方案"主题，
+  /// 用于研究方向对话框的预填。失败返回空串（仅为输入便利，不阻断流程）。
+  Future<String> suggestResearchTopic() async {
+    if (_research == null || activeConv == null) return '';
+    final digest = _conversationDigest();
+    if (digest.isEmpty) return '';
+    try {
+      final out = await ModelClient(settings, role: ModelRole.research).complete(
+        system: '你擅长从工程实践里发现值得研究的方向。',
+        user: '基于下面这段项目开发会话，提炼一个值得深入研究的'
+            '“新算法 / 新思路 / 设计或实现方案”作为研究主题。'
+            '只返回一行、聚焦、不超过 30 字的主题本身，不要解释、不要标点结尾。\n\n会话：\n$digest',
+      );
+      return out.split('\n').first.trim();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// 研究会话的原始输入（topic, clarification），按会话 id 暂存于内存，
+  /// 供「重发」在同一会话内用相同输入重跑（失败重试）。本进程内有效。
+  final Map<String, (String, String)> _researchInputs = {};
+
+  /// 基于当前会话 + 用户想法发起一次主题研究：
+  /// 新建一个「研究」类型会话（落在项目会话列表，tag 研究），复用主题研究引擎执行，
+  /// 报告存入知识库（但不登记主题研究历史），并把结论并入本项目记忆以指导后续开发。
+  Future<void> startResearch(String idea) async {
+    final path = current;
+    if (path == null) throw StateError('请先打开一个项目');
+    if (_research == null) throw StateError('主题研究服务不可用');
+    if (running) throw StateError('已有任务在进行中');
+    final topic = idea.trim();
+    if (topic.isEmpty) throw StateError('请填写研究方向');
+
+    // 先取背景（必须在新建研究会话前取，否则 activeConv 会被切走）。
+    final digest = _conversationDigest();
+
+    // 把会话背景 + 工程概览作为研究的澄清说明，引导研究聚焦到落地方案。
+    final buf = StringBuffer()
+      ..writeln('本研究源自项目「${path.split('\\').last}」的一次开发会话，'
+          '请围绕用户的想法，研究可落地的新算法 / 新思路 / 设计实现方案。')
+      ..writeln()
+      ..writeln('【用户想法】')
+      ..writeln(topic);
+    if (digest.isNotEmpty) {
+      buf
+        ..writeln()
+        ..writeln('【会话背景（需求与已实现要点）】')
+        ..writeln(digest);
+    }
+    final overview = index.overview();
+    if (overview.trim().isNotEmpty) {
+      buf
+        ..writeln()
+        ..writeln('【工程概览】')
+        ..writeln(_clip(overview, 1500));
+    }
+    final clarification = buf.toString();
+
+    final conv = ProjectConversation(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      title: topic.length > 30 ? '${topic.substring(0, 30)}…' : topic,
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+      events: [AgentEvent.user('🔬 基于当前会话研究：$topic')],
+      kind: ConvKind.research,
+    );
+    conversations.insert(0, conv);
+    activeConv = conv;
+    _researchInputs[conv.id] = (topic, clarification);
+    notifyListeners();
+
+    await _runResearchInto(conv, path, topic, clarification);
+  }
+
+  /// 重发：在同一研究会话内用相同输入重新跑一次研究（失败后重试）。
+  Future<void> resendResearch(ProjectConversation conv) async {
+    final path = current;
+    if (path == null) throw StateError('请先打开一个项目');
+    if (_research == null) throw StateError('主题研究服务不可用');
+    if (running) throw StateError('已有任务在进行中');
+    final input = _researchInputs[conv.id];
+    if (input == null) {
+      throw StateError('该研究的原始输入已不可用，请从源开发会话重新发起');
+    }
+    activeConv = conv;
+    conv.events.add(AgentEvent.user('🔁 重新研究：${input.$1}'));
+    notifyListeners();
+    await _runResearchInto(conv, path, input.$1, input.$2);
+  }
+
+  /// 把一次研究跑进指定会话：复用主题研究引擎，报告作为助手消息呈现，
+  /// 报告存知识库（不登记主题研究历史），并把结论并入本项目记忆。
+  Future<void> _runResearchInto(
+      ProjectConversation conv, String path, String topic, String clarification) async {
+    running = true;
+    _cancel = false;
+    notifyListeners();
+    try {
+      final report = await _research!.researchForAgent(
+        topic,
+        clarification: clarification,
+        log: _status,
+        recordInHistory: false, // 研究归项目所有，不进主题研究历史。
+      );
+      _push(AgentEvent.assistant(report)..status = StepStatus.done);
+      conv.researchPath = _research.lastReportPath;
+      _status('完成！研究报告已存入知识库'
+          '${conv.researchPath != null ? '：${conv.researchPath!.split('\\').last}' : ''}');
+      await _rememberResearch(path, topic, report);
+    } catch (e) {
+      _status('研究失败：$e（可点用户消息上的「重发」重试）');
+    } finally {
+      running = false;
+      _cancel = false;
+      conv.updatedAt = DateTime.now();
+      await _saveConversations();
+      notifyListeners();
+    }
+  }
+
+  /// 把研究结论并入本项目记忆库，让后续开发能回忆到这次研究。
+  Future<void> _rememberResearch(String path, String topic, String report) async {
+    try {
+      final body = StringBuffer()
+        ..writeln('**Why:** 这是基于本项目会话发起的一次深度研究，结论可指导后续实现。')
+        ..writeln('**How to apply:** 推进相关功能时对照该研究的方案与结论。')
+        ..writeln()
+        ..writeln('## 研究：$topic')
+        ..writeln(_clip(report, 4000));
+      await memory.remember(
+        store: _projectStore(path),
+        type: MemoryType.project,
+        name: '研究：$topic',
+        description: '基于本项目会话发起的研究结论，供后续开发参考',
+        body: body.toString(),
+      );
+    } catch (e) {
+      _status('研究结论并入记忆失败（不影响结果）：$e');
     }
   }
 

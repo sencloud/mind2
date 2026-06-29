@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:url_launcher/url_launcher.dart';
 
+import '../services/agent/agent_event.dart';
 import '../services/code_index_service.dart';
 import '../services/project_service.dart';
 import 'agent_events_view.dart';
@@ -29,6 +30,34 @@ class _ProjectPageState extends State<ProjectPage> {
 
   /// 左侧面板标签：0=会话历史，1=文件树。
   int _leftTab = 0;
+
+  /// 主区域已打开的文件（绝对路径，按打开顺序），像 VSCode 的编辑器 tab。
+  final List<String> _openDocs = [];
+
+  /// 当前激活的文件 tab；null 表示「对话」tab。
+  String? _activeDoc;
+
+  /// 已绑定的工程路径，切换工程时清空已打开的文件 tab。
+  String? _boundProject;
+
+  /// 打开一个文件为主区域 tab（已打开则只激活）。
+  void _openDoc(String abs) {
+    setState(() {
+      if (!_openDocs.contains(abs)) _openDocs.add(abs);
+      _activeDoc = abs;
+    });
+  }
+
+  /// 关闭一个文件 tab；若关的是当前 tab，则回退到最后一个或「对话」。
+  void _closeDoc(String abs) {
+    setState(() {
+      final wasActive = _activeDoc == abs;
+      _openDocs.remove(abs);
+      if (wasActive) {
+        _activeDoc = _openDocs.isNotEmpty ? _openDocs.last : null;
+      }
+    });
+  }
 
   @override
   void dispose() {
@@ -121,7 +150,7 @@ class _ProjectPageState extends State<ProjectPage> {
   void _openRel(String rel) {
     final root = widget.project.current;
     if (root == null) return;
-    showCodeViewer(context, p.join(root, rel.replaceAll('/', p.separator)));
+    _openDoc(p.join(root, rel.replaceAll('/', p.separator)));
   }
 
   @override
@@ -233,6 +262,12 @@ class _ProjectPageState extends State<ProjectPage> {
 
   Widget _buildConsole(ProjectService proj) {
     final path = proj.current!;
+    // 切换工程时清空上一个工程打开的文件 tab。
+    if (_boundProject != path) {
+      _boundProject = path;
+      _openDocs.clear();
+      _activeDoc = null;
+    }
     _scrollToBottom();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -249,42 +284,13 @@ class _ProjectPageState extends State<ProjectPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    _buildEditorTabs(proj),
+                    const SizedBox(height: 8),
                     Expanded(
-                      child: Container(
-                        width: double.infinity,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFFCFCFD),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: const Color(0xFFECECEE)),
-                        ),
-                        child: proj.events.isEmpty
-                            ? const Center(
-                                child: Padding(
-                                  padding:
-                                      EdgeInsets.symmetric(horizontal: 24),
-                                  child: Text(
-                                    '在下方输入开发需求（如「给用户模块加上邮箱验证码登录」），'
-                                    '回车发送。Agent 会先用 grep/glob 检索定位相关代码，再动手开发，'
-                                    '过程会实时显示在这里。',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(
-                                        fontSize: 12.5,
-                                        color: Color(0xFF8B8B93)),
-                                  ),
-                                ),
-                              )
-                            : Padding(
-                                padding: const EdgeInsets.only(top: 12),
-                                child: AgentEventsView(
-                                    key: ValueKey(proj.activeConv?.id),
-                                    events: proj.events,
-                                    controller: _scroll,
-                                    onOpenFile: _openRel),
-                              ),
-                      ),
+                      child: _activeDoc == null
+                          ? _buildConvPane(proj)
+                          : _buildDocPane(_activeDoc!),
                     ),
-                    const SizedBox(height: 10),
-                    _buildComposer(proj),
                   ],
                 ),
               ),
@@ -293,6 +299,137 @@ class _ProjectPageState extends State<ProjectPage> {
         ),
       ],
     );
+  }
+
+  /// 主区域的编辑器 tab 条：固定的「对话」tab + 每个打开文件一个可关闭 tab。
+  Widget _buildEditorTabs(ProjectService proj) {
+    return SizedBox(
+      height: 34,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _EditorTab(
+            icon: Icons.forum_outlined,
+            label: '对话',
+            active: _activeDoc == null,
+            onTap: () => setState(() => _activeDoc = null),
+          ),
+          if (_openDocs.isNotEmpty) const SizedBox(width: 6),
+          Expanded(
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: _openDocs.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 6),
+              itemBuilder: (context, i) {
+                final d = _openDocs[i];
+                return _EditorTab(
+                  icon: Icons.description_outlined,
+                  label: p.basename(d),
+                  active: _activeDoc == d,
+                  onTap: () => setState(() => _activeDoc = d),
+                  onClose: () => _closeDoc(d),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 「对话」tab 内容：运行事件区 + 输入框（保持原有体验）。
+  Widget _buildConvPane(ProjectService proj) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(
+          child: Container(
+            width: double.infinity,
+            decoration: BoxDecoration(
+              color: const Color(0xFFFCFCFD),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: const Color(0xFFECECEE)),
+            ),
+            child: proj.events.isEmpty
+                ? const Center(
+                    child: Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 24),
+                      child: Text(
+                        '在下方输入开发需求（如「给用户模块加上邮箱验证码登录」），'
+                        '回车发送。Agent 会先用 grep/glob 检索定位相关代码，再动手开发，'
+                        '过程会实时显示在这里。',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                            fontSize: 12.5, color: Color(0xFF8B8B93)),
+                      ),
+                    ),
+                  )
+                : Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: AgentEventsView(
+                        key: ValueKey(proj.activeConv?.id),
+                        events: proj.events,
+                        controller: _scroll,
+                        onOpenFile: _openRel,
+                        onResend:
+                            proj.running ? null : (e) => _resend(proj, e)),
+                  ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        _buildComposer(proj),
+      ],
+    );
+  }
+
+  /// 文件 tab 内容：内嵌文件查看器（md 预览/源码，其他高亮源码）。
+  Widget _buildDocPane(String abs) {
+    return Container(
+      width: double.infinity,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFECECEE)),
+      ),
+      child: FileContentView(key: ValueKey(abs), absPath: abs),
+    );
+  }
+
+  /// 重发某条用户消息：开发会话重跑该指令；研究会话用原始输入重跑研究。
+  Future<void> _resend(ProjectService proj, AgentEvent userEvent) async {
+    final conv = proj.activeConv;
+    if (conv == null) return;
+    try {
+      if (conv.kind == ConvKind.research) {
+        await proj.resendResearch(conv);
+      } else {
+        await proj.develop(userEvent.text);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$e')));
+      }
+    }
+  }
+
+  /// 弹出研究方向对话框，确认后基于当前会话发起一次主题研究。
+  Future<void> _startResearch(ProjectService proj) async {
+    final idea = await showDialog<String>(
+      context: context,
+      builder: (_) => _ResearchDialog(proj: proj),
+    );
+    if (idea == null || idea.trim().isEmpty) return;
+    try {
+      // startResearch 内部异常已自行记录到会话；此处仅捕获前置守卫错误。
+      await proj.startResearch(idea);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$e')));
+      }
+    }
   }
 
   Widget _buildHeader(ProjectService proj, String path) {
@@ -348,6 +485,16 @@ class _ProjectPageState extends State<ProjectPage> {
               label: const Text('停止', style: TextStyle(fontSize: 12.5)),
             ),
           IconButton(
+            tooltip: '基于当前会话开始主题研究',
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.science_outlined, size: 16),
+            color: const Color(0xFF7C3AED),
+            onPressed:
+                (proj.running || proj.activeConv == null || !proj.canResearch)
+                    ? null
+                    : () => _startResearch(proj),
+          ),
+          IconButton(
             tooltip: '在资源管理器中打开',
             visualDensity: VisualDensity.compact,
             icon: const Icon(Icons.open_in_new, size: 16),
@@ -399,9 +546,7 @@ class _ProjectPageState extends State<ProjectPage> {
           Expanded(
             child: _leftTab == 0
                 ? _buildConvBody(proj)
-                : _FileTreeView(root: proj.current!, onOpen: (abs) {
-                    showCodeViewer(context, abs);
-                  }),
+                : _FileTreeView(root: proj.current!, onOpen: _openDoc),
           ),
         ],
       ),
@@ -451,6 +596,7 @@ class _ProjectPageState extends State<ProjectPage> {
           title: c.title,
           time: _relTime(c.updatedAt),
           selected: selected,
+          isResearch: c.kind == ConvKind.research,
           onTap: () => proj.openConversation(c),
           onDelete: proj.running && selected
               ? null
@@ -536,6 +682,166 @@ class _ProjectPageState extends State<ProjectPage> {
                 : const Icon(Icons.arrow_upward, size: 18),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 「基于当前会话开始主题研究」对话框：自动用模型给出研究方向建议（可编辑），
+/// 确认后返回研究方向文本。
+class _ResearchDialog extends StatefulWidget {
+  const _ResearchDialog({required this.proj});
+
+  final ProjectService proj;
+
+  @override
+  State<_ResearchDialog> createState() => _ResearchDialogState();
+}
+
+class _ResearchDialogState extends State<_ResearchDialog> {
+  final _ctrl = TextEditingController();
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSuggestion();
+  }
+
+  Future<void> _loadSuggestion() async {
+    final s = await widget.proj.suggestResearchTopic();
+    if (!mounted) return;
+    setState(() {
+      if (s.isNotEmpty && _ctrl.text.trim().isEmpty) _ctrl.text = s;
+      _loading = false;
+    });
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('基于当前会话开始主题研究',
+          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+      content: SizedBox(
+        width: 420,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '研究将基于当前会话的需求与代码，围绕你的想法展开（新算法 / 新思路 / 方案）。'
+              '研究会话会出现在左侧列表并标记「研究」，报告存入知识库。',
+              style: TextStyle(fontSize: 12, color: Color(0xFF6B6B70)),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _ctrl,
+              autofocus: true,
+              minLines: 1,
+              maxLines: 3,
+              style: const TextStyle(fontSize: 13),
+              decoration: InputDecoration(
+                hintText: _loading ? '正在根据会话生成研究方向建议…' : '你想研究的新算法 / 思路 / 方案',
+                isDense: true,
+                border: const OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, _ctrl.text),
+          style: FilledButton.styleFrom(backgroundColor: const Color(0xFF7C3AED)),
+          child: const Text('开始研究'),
+        ),
+      ],
+    );
+  }
+}
+
+/// 主区域编辑器 tab（像 VSCode 的标签）：可激活、可关闭。
+class _EditorTab extends StatelessWidget {
+  const _EditorTab({
+    required this.icon,
+    required this.label,
+    required this.active,
+    required this.onTap,
+    this.onClose,
+  });
+
+  final IconData icon;
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+
+  /// 为 null 时不显示关闭按钮（如固定的「对话」tab）。
+  final VoidCallback? onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: active ? Colors.white : const Color(0xFFF2F2F4),
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: onTap,
+        child: Container(
+          padding: EdgeInsets.fromLTRB(10, 0, onClose != null ? 4 : 10, 0),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+                color: active
+                    ? const Color(0xFFD7DBE0)
+                    : const Color(0xFFECECEE)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon,
+                  size: 14,
+                  color: active
+                      ? const Color(0xFF0D9488)
+                      : const Color(0xFF8A8A92)),
+              const SizedBox(width: 6),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 160),
+                child: Text(label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight:
+                            active ? FontWeight.w600 : FontWeight.w500,
+                        color: active
+                            ? const Color(0xFF2B2B2E)
+                            : const Color(0xFF6B6B70))),
+              ),
+              if (onClose != null) ...[
+                const SizedBox(width: 4),
+                InkWell(
+                  borderRadius: BorderRadius.circular(4),
+                  onTap: onClose,
+                  child: const Padding(
+                    padding: EdgeInsets.all(3),
+                    child:
+                        Icon(Icons.close, size: 13, color: Color(0xFF9B9B9F)),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -771,6 +1077,7 @@ class _ConvTile extends StatelessWidget {
     required this.selected,
     required this.onTap,
     required this.onDelete,
+    this.isResearch = false,
   });
 
   final String title;
@@ -778,6 +1085,9 @@ class _ConvTile extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
   final VoidCallback? onDelete;
+
+  /// 是否为「研究」类型会话（显示研究标签）。
+  final bool isResearch;
 
   @override
   Widget build(BuildContext context) {
@@ -797,15 +1107,38 @@ class _ConvTile extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                              fontSize: 12.5,
-                              fontWeight: selected
-                                  ? FontWeight.w600
-                                  : FontWeight.w500,
-                              color: const Color(0xFF2B2B2E))),
+                      Row(
+                        children: [
+                          if (isResearch) ...[
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 5, vertical: 1),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF7C3AED)
+                                    .withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: const Text('研究',
+                                  style: TextStyle(
+                                      fontSize: 10,
+                                      color: Color(0xFF7C3AED),
+                                      fontWeight: FontWeight.w600)),
+                            ),
+                            const SizedBox(width: 5),
+                          ],
+                          Expanded(
+                            child: Text(title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                    fontSize: 12.5,
+                                    fontWeight: selected
+                                        ? FontWeight.w600
+                                        : FontWeight.w500,
+                                    color: const Color(0xFF2B2B2E))),
+                          ),
+                        ],
+                      ),
                       const SizedBox(height: 2),
                       Text(time,
                           style: const TextStyle(
