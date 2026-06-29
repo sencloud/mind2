@@ -30,16 +30,17 @@ class ProjectConversation {
     required this.title,
     required this.createdAt,
     required this.updatedAt,
-    required this.events,
+    List<AgentEvent>? events,
+    List<Map<String, dynamic>>? rawEvents,
     this.kind = ConvKind.dev,
     this.researchPath,
-  });
+  })  : _events = events,
+        _rawEvents = rawEvents;
 
   final String id;
   String title;
   final DateTime createdAt;
   DateTime updatedAt;
-  final List<AgentEvent> events;
 
   /// 会话类型（开发 / 研究），用于在会话列表上区分与打标。
   final ConvKind kind;
@@ -47,12 +48,26 @@ class ProjectConversation {
   /// 研究会话产出的报告笔记路径（仅 research 会话有）。
   String? researchPath;
 
+  // 事件「懒解析」：从磁盘加载会话列表时，只保留原始 JSON（_rawEvents），
+  // 不立刻构造成 AgentEvent。只有当某个会话被真正打开（访问 events）时才解析，
+  // 避免一次性把所有历史会话的事件（含大段工具输出/研究报告）都解析出来卡 UI。
+  List<AgentEvent>? _events;
+  final List<Map<String, dynamic>>? _rawEvents;
+
+  /// 该会话的事件列表；首次访问时按需从原始 JSON 解析并缓存。
+  List<AgentEvent> get events => _events ??= (_rawEvents ?? const [])
+      .map((e) => AgentEvent.fromJson(e))
+      .toList();
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'title': title,
         'createdAt': createdAt.toIso8601String(),
         'updatedAt': updatedAt.toIso8601String(),
-        'events': events.map((e) => e.toJson()).toList(),
+        // 从未打开过的会话直接回写原始事件 JSON，省去「解析→再序列化」的开销。
+        'events': _events != null
+            ? _events!.map((e) => e.toJson()).toList()
+            : (_rawEvents ?? const <Map<String, dynamic>>[]),
         'kind': kind.name,
         if (researchPath != null) 'researchPath': researchPath,
       };
@@ -65,9 +80,9 @@ class ProjectConversation {
             DateTime.tryParse(j['createdAt'] as String? ?? '') ?? DateTime.now(),
         updatedAt:
             DateTime.tryParse(j['updatedAt'] as String? ?? '') ?? DateTime.now(),
-        events: ((j['events'] as List?) ?? [])
+        rawEvents: ((j['events'] as List?) ?? [])
             .whereType<Map>()
-            .map((e) => AgentEvent.fromJson(e.cast<String, dynamic>()))
+            .map((e) => e.cast<String, dynamic>())
             .toList(),
         kind: ConvKind.values.firstWhere(
           (k) => k.name == j['kind'],
@@ -213,11 +228,22 @@ class ProjectService extends ChangeNotifier {
     projects.remove(path);
     projects.insert(0, path);
     current = path;
-    _loadConversations(path);
-    activeConv = conversations.isNotEmpty ? conversations.first : null;
+    // 立即切入项目并刷新界面：会话历史稍后异步填充、工程文件后台扫描。
+    // 这样点击不会被「同步读历史 + 同步扫全盘」阻塞，避免打开卡顿。
+    conversations = [];
+    activeConv = null;
     notifyListeners();
     _persistProjects();
-    _bindIndex(path);
+    _bindIndex(path); // 后台扫描（compute 丢到后台 isolate）
+    unawaited(_loadConversationsAsync(path)); // 后台加载会话历史
+  }
+
+  /// 后台异步加载会话历史并刷新界面；期间若已切到别的工程则丢弃本次结果。
+  Future<void> _loadConversationsAsync(String path) async {
+    await _loadConversations(path);
+    if (current != path) return;
+    activeConv = conversations.isNotEmpty ? conversations.first : null;
+    notifyListeners();
   }
 
   /// 把一次实验的工程目录作为「项目」打开，并关联到其来源研究报告：
@@ -349,7 +375,8 @@ class ProjectService extends ChangeNotifier {
     notifyListeners();
     try {
       // 记录改动前的文件快照（用于汇总本轮改动了哪些文件）。
-      final before = index.bound ? index.snapshotMtimes() : const <String, int>{};
+      final before =
+          index.bound ? await index.snapshotMtimes() : const <String, int>{};
 
       final reporter = _buildReporter();
       final result =
@@ -357,7 +384,7 @@ class ProjectService extends ChangeNotifier {
 
       // 汇总本轮改动文件（按 mtime 差异）。
       if (index.bound) {
-        final after = index.snapshotMtimes();
+        final after = await index.snapshotMtimes();
         final changed = <String>[];
         after.forEach((rel, mtime) {
           if (!before.containsKey(rel) || before[rel] != mtime) {
@@ -633,24 +660,29 @@ class ProjectService extends ChangeNotifier {
   File _chatsFile(String projectPath) =>
       File('${_dataDir(projectPath).path}\\conversations.json');
 
-  void _loadConversations(String projectPath) {
+  Future<void> _loadConversations(String projectPath) async {
     conversations = [];
     try {
       final f = _chatsFile(projectPath);
-      if (f.existsSync()) {
-        final data = jsonDecode(f.readAsStringSync());
-        if (data is List) {
-          conversations = data
-              .whereType<Map>()
-              .map((e) =>
-                  ProjectConversation.fromJson(e.cast<String, dynamic>()))
-              .toList()
-            ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
-        }
-      }
+      if (!await f.exists()) return;
+      // 异步读盘 + 把（可能很大的）JSON 解析丢到后台 isolate，避免阻塞 UI。
+      final raw = await f.readAsString();
+      final data = await compute(_decodeJsonList, raw);
+      // 仅构造轻量的会话元信息；事件留作原始 JSON 懒解析（见 ProjectConversation）。
+      conversations = data
+          .whereType<Map>()
+          .map((e) => ProjectConversation.fromJson(e.cast<String, dynamic>()))
+          .toList()
+        ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
     } catch (_) {
       conversations = [];
     }
+  }
+
+  /// 在后台 isolate 解析 JSON 字符串为 List（重活，避免阻塞 UI 线程）。
+  static List _decodeJsonList(String raw) {
+    final data = jsonDecode(raw);
+    return data is List ? data : const [];
   }
 
   Future<void> _saveConversations() async {

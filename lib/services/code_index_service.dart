@@ -54,14 +54,16 @@ class CodeIndexService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 重新扫描工程文件（纯 IO，很快）。
+  /// 重新扫描工程文件。
+  /// 关键：遍历放到后台 isolate（compute）执行，避免在 UI 线程做几千次
+  /// listSync/statSync 阻塞导致「打开项目卡顿」。
   Future<void> rescan() async {
     final root = _root;
     if (root == null) return;
     scanning = true;
     notifyListeners();
     try {
-      _fileCount = _scanFiles(root).length;
+      _fileCount = (await compute(_scan, root.path)).length;
     } finally {
       scanning = false;
       notifyListeners();
@@ -69,10 +71,11 @@ class CodeIndexService extends ChangeNotifier {
   }
 
   /// 扫描工程代码文件，返回 rel -> mtime(ms)，供调用方比对"本轮改动了哪些文件"。
-  Map<String, int> snapshotMtimes() {
+  /// 同样在后台 isolate 执行，不阻塞 UI。
+  Future<Map<String, int>> snapshotMtimes() async {
     final root = _root;
     if (root == null) return const {};
-    return _scanFiles(root);
+    return compute(_scan, root.path);
   }
 
   /// 顶层目录树（最多两层）+ 文件统计，作为 Agent 的初始工程概览。
@@ -120,7 +123,11 @@ class CodeIndexService extends ChangeNotifier {
     return buf.toString();
   }
 
-  Map<String, int> _scanFiles(Directory root) {
+  /// 实际遍历逻辑（静态、纯函数）：接收工程根路径，返回 rel -> mtime(ms)。
+  /// 设计成静态方法是为了能被 compute 丢到后台 isolate 执行——同步的
+  /// listSync/statSync 阻塞只发生在后台线程，主 UI 线程保持流畅。
+  static Map<String, int> _scan(String rootPath) {
+    final root = Directory(rootPath);
     final out = <String, int>{};
     void walk(Directory dir) {
       if (out.length >= _maxFiles) return;
@@ -147,7 +154,7 @@ class CodeIndexService extends ChangeNotifier {
           }
           if (st.size == 0) continue;
           final rel =
-              p.relative(e.path, from: root.path).replaceAll('\\', '/');
+              p.relative(e.path, from: rootPath).replaceAll('\\', '/');
           out[rel] = st.modified.millisecondsSinceEpoch;
         }
       }
