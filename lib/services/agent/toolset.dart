@@ -1,12 +1,16 @@
+import '../topic_service.dart';
 import 'model_client.dart';
 import 'tool.dart';
 import 'tool_registry.dart';
 import 'tools/bash_tool.dart';
+import 'tools/deep_research_tool.dart';
 import 'tools/edit_tool.dart';
 import 'tools/glob_tool.dart';
 import 'tools/grep_tool.dart';
+import 'tools/knowledge_search_tool.dart';
 import 'tools/read_tool.dart';
 import 'tools/subagent_tool.dart';
+import 'tools/web_read_tool.dart';
 import 'tools/write_tool.dart';
 
 /// 工具集工厂：为给定 agent 类型与递归深度装配 ToolRegistry，
@@ -19,9 +23,13 @@ class AgentToolset {
     required this.model,
     this.maxDepth = 2,
     this.subAgentMaxTurns = 0,
+    this.research,
   });
 
   final ModelClient model;
+
+  /// 主题研究服务；非空时，顶层 agent 会获得 deep_research 工具。
+  final TopicFetchService? research;
 
   /// 子 agent 最大递归深度（主 agent=0；超过则不再提供 task 工具）。
   final int maxDepth;
@@ -33,13 +41,31 @@ class AgentToolset {
   ToolRegistry buildRegistry(String agentType, int depth) {
     final tools = <AgentTool>[];
 
+    // 跨模块共享能力（只读、安全）：读网页 + 检索知识库。
+    // 让任何 agent（项目/实验/计划/子 agent）都能复用这些模块功能。
+    final shared = <AgentTool>[
+      WebReadTool(),
+      KnowledgeSearchTool(model.settings.vaultPath),
+    ];
+
     if (agentType == 'explore') {
       // 只读探索：检索类工具直接可用。
-      tools.addAll([ReadTool(), GlobTool(), GrepTool()]);
+      tools.addAll([ReadTool(), GlobTool(), GrepTool(), ...shared]);
     } else {
       // 通用：读写执行 + 检索（grep/glob）全部常驻，按需 agentic 检索。
-      tools.addAll(
-          [ReadTool(), WriteTool(), EditTool(), BashTool(), GlobTool(), GrepTool()]);
+      tools.addAll([
+        ReadTool(),
+        WriteTool(),
+        EditTool(),
+        BashTool(),
+        GlobTool(),
+        GrepTool(),
+        ...shared,
+      ]);
+      // 主题研究较重且不可并发，只给顶层 agent（depth==0）提供，避免子 agent 嵌套触发。
+      if (research != null && depth == 0) {
+        tools.add(DeepResearchTool(research!));
+      }
     }
 
     if (depth < maxDepth) {

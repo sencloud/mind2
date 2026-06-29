@@ -38,6 +38,16 @@ class LlmProviderPreset {
   final String hint;
 }
 
+/// 按「任务角色」区分模型通道。统一 LLM 客户端据此为每类任务挑选合适的模型，
+/// 而不再是过去那种「默认 DeepSeek vs 实验模型」的两档粗粒度划分。
+/// - chat：日常聊天
+/// - writing：写作（小说/论文/正式文档）
+/// - research：主题研究的规划与综合
+/// - agent：实验/项目/计划等需要工具调用的 Agent 主循环
+/// - small：记忆选择/抽取、分类合并等廉价小任务
+/// - vision：需要读图（截图）的任务
+enum ModelRole { chat, writing, research, agent, small, vision }
+
 class SettingsService extends ChangeNotifier {
   late SharedPreferences _prefs;
 
@@ -166,6 +176,40 @@ class SettingsService extends ChangeNotifier {
 
   Future<void> setExperimentProvider(String key) async {
     await _prefs.setString('experimentProvider', key);
+    notifyListeners();
+  }
+
+  // ---------------------------------------------------------------------------
+  // 按任务角色的模型路由（统一 LLM 客户端使用）
+  // ---------------------------------------------------------------------------
+
+  /// 角色 → 供应商 key。用户在设置里为某角色单独指定时优先用其选择；
+  /// 否则用默认映射：agent 跟随「实验/项目大模型」，其余角色走默认 DeepSeek。
+  /// 这样在用户未做任何配置时，行为与改造前完全一致。
+  String roleProviderKey(ModelRole role) {
+    final saved = (_prefs.getString('role_${role.name}_provider') ?? '').trim();
+    if (saved.isNotEmpty) return saved;
+    return role == ModelRole.agent ? experimentProvider : 'deepseek';
+  }
+
+  /// 该角色用户显式指定的供应商 key；为空表示沿用默认映射（供设置页展示）。
+  String roleProviderOverride(ModelRole role) =>
+      (_prefs.getString('role_${role.name}_provider') ?? '').trim();
+
+  String roleBaseUrl(ModelRole role) => providerBaseUrl(roleProviderKey(role));
+  String roleApiKey(ModelRole role) => providerApiKey(roleProviderKey(role));
+  String roleModel(ModelRole role) => providerModel(roleProviderKey(role));
+
+  /// 该角色当前是否就绪（对应供应商已填好 Key）。
+  bool roleReady(ModelRole role) => providerReady(roleProviderKey(role));
+
+  /// 为某个角色单独指定供应商（传空字符串表示恢复默认映射）。
+  Future<void> setRoleProvider(ModelRole role, String key) async {
+    if (key.trim().isEmpty) {
+      await _prefs.remove('role_${role.name}_provider');
+    } else {
+      await _prefs.setString('role_${role.name}_provider', key.trim());
+    }
     notifyListeners();
   }
 

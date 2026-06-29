@@ -250,6 +250,8 @@ class _SettingsPageState extends State<SettingsPage> {
               const SizedBox(height: 8),
               _buildExperimentModelCard(),
               const SizedBox(height: 8),
+              _buildRoleModelCard(),
+              const SizedBox(height: 8),
               _buildZoteroCard(),
               const SizedBox(height: 8),
               _buildPlaywrightCard(),
@@ -293,6 +295,92 @@ class _SettingsPageState extends State<SettingsPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [for (final p in providers) _buildProviderTile(p)],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 「各功能使用的模型」：为每类任务单独挑选供应商。
+  /// 选「默认」即沿用推荐映射（Agent 跟随上面的实验大模型，其余走 DeepSeek），
+  /// 不配置时行为与以前完全一致。改动即时保存。
+  Widget _buildRoleModelCard() {
+    const roles = <(ModelRole, String, String)>[
+      (ModelRole.chat, '聊天', '日常对话回复'),
+      (ModelRole.writing, '写作', '小说 / 论文 / 正式文档生成'),
+      (ModelRole.research, '主题研究', '研究规划与报告综合'),
+      (ModelRole.agent, '实验 / 项目 / 计划', '需要工具调用的 Agent 主循环'),
+      (ModelRole.small, '轻量任务', '记忆抽取、分类合并等廉价调用'),
+      (ModelRole.vision, '读图分析', '网页截图等需要视觉的判断'),
+    ];
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 14, 18, 16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFAFAFB),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFECECEE)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '各功能使用的模型',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            '可为不同任务分别指定模型，例如写作用更强的模型、轻量任务用便宜模型。'
+            '选「默认」即沿用推荐：实验/项目/计划跟随上面的大模型，其余走 DeepSeek。',
+            style: TextStyle(fontSize: 12, color: Color(0xFF8B8B90)),
+          ),
+          const SizedBox(height: 8),
+          for (final r in roles) _buildRoleRow(r.$1, r.$2, r.$3),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRoleRow(ModelRole role, String label, String hint) {
+    final current = widget.settings.roleProviderOverride(role);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                Text(
+                  hint,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF9B9B9F),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          DropdownButton<String>(
+            value: current,
+            underline: const SizedBox.shrink(),
+            style: const TextStyle(fontSize: 13, color: Color(0xFF2B2B2E)),
+            items: [
+              const DropdownMenuItem(value: '', child: Text('默认（推荐）')),
+              for (final p in SettingsService.experimentProviders)
+                DropdownMenuItem(value: p.key, child: Text(p.name)),
+            ],
+            onChanged: (v) async {
+              await widget.settings.setRoleProvider(role, v ?? '');
+              if (mounted) setState(() {});
+            },
           ),
         ],
       ),

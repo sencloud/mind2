@@ -6,6 +6,7 @@ const _accent = Color(0xFF0D9488);
 const _ink = Color(0xFF2B2B2E);
 const _sub = Color(0xFF6B6B70);
 const _muted = Color(0xFF9B9B9F);
+
 const _inspireGenreOptions = [
   '玄幻',
   '奇幻',
@@ -23,6 +24,131 @@ const _inspireGenreOptions = [
   '现实 / 生存',
   '非虚构',
 ];
+
+class _QuestionDraft {
+  _QuestionDraft(this.questions)
+    : customInputs = [
+        for (var i = 0; i < questions.length; i++) TextEditingController(),
+      ];
+
+  final List<BookDiscussionQuestion> questions;
+  final List<TextEditingController> customInputs;
+  final Map<int, Set<int>> selected = {};
+
+  void dispose() {
+    for (final controller in customInputs) {
+      controller.dispose();
+    }
+  }
+
+  bool get hasAnswers {
+    for (var i = 0; i < questions.length; i++) {
+      if ((selected[i] ?? const <int>{}).isNotEmpty) return true;
+      if (customInputs[i].text.trim().isNotEmpty) return true;
+    }
+    return false;
+  }
+
+  String composeAnswer({String prefix = ''}) {
+    final buf = StringBuffer();
+    if (prefix.trim().isNotEmpty) {
+      buf
+        ..writeln('补充说明：')
+        ..writeln(prefix.trim())
+        ..writeln();
+    }
+    for (var i = 0; i < questions.length; i++) {
+      final question = questions[i];
+      final choices = <String>[
+        for (final optionIndex in (selected[i] ?? const <int>{}))
+          if (optionIndex >= 0 && optionIndex < question.options.length)
+            question.options[optionIndex],
+      ];
+      final custom = customInputs[i].text.trim();
+      if (choices.isEmpty && custom.isEmpty) continue;
+      buf.writeln('${i + 1}. ${question.prompt}');
+      for (final choice in choices) {
+        buf.writeln('- $choice');
+      }
+      if (custom.isNotEmpty) buf.writeln('- 其他：$custom');
+      buf.writeln();
+    }
+    return buf.toString().trim();
+  }
+}
+
+Widget _questionChoiceList(_QuestionDraft draft, VoidCallback onChanged) {
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      for (var i = 0; i < draft.questions.length; i++)
+        Container(
+          width: double.infinity,
+          margin: const EdgeInsets.only(top: 10),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFFECECEE)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${i + 1}. ${draft.questions[i].prompt}',
+                style: const TextStyle(
+                  fontSize: 13,
+                  height: 1.45,
+                  color: _ink,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 8),
+              for (var j = 0; j < draft.questions[i].options.length; j++)
+                CheckboxListTile(
+                  value: draft.selected[i]?.contains(j) ?? false,
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  visualDensity: VisualDensity.compact,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  title: Text(
+                    draft.questions[i].options[j],
+                    style: const TextStyle(
+                      fontSize: 12.5,
+                      height: 1.35,
+                      color: _ink,
+                    ),
+                  ),
+                  onChanged: (checked) {
+                    final set = draft.selected.putIfAbsent(i, () => <int>{});
+                    if (checked == true) {
+                      set.add(j);
+                    } else {
+                      set.remove(j);
+                    }
+                    onChanged();
+                  },
+                ),
+              const SizedBox(height: 6),
+              TextField(
+                controller: draft.customInputs[i],
+                minLines: 1,
+                maxLines: 3,
+                onChanged: (_) => onChanged(),
+                style: const TextStyle(fontSize: 12.5, height: 1.4),
+                decoration: const InputDecoration(
+                  labelText: '其他 / 自己输入',
+                  hintText: '没有合适选项时，在这里补充你的想法',
+                  isDense: true,
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+        ),
+    ],
+  );
+}
 
 class BookPage extends StatefulWidget {
   const BookPage({super.key, required this.book});
@@ -86,7 +212,7 @@ class _BookPageState extends State<BookPage> {
           const SizedBox(height: 6),
           const Text(
             '像专业作者一样写长篇：先立项（题材/读者/文风/核心创意），再由 AI 生成故事设定集与章节大纲，'
-            '然后逐章成文（自动携带设定与上一章上下文保证连贯），最后润色并导出。',
+            '再按篇讨论主题、配角和阶段方向，最后按篇逐章成文并导出。',
             style: TextStyle(fontSize: 13, color: _sub),
           ),
           const SizedBox(height: 24),
@@ -170,7 +296,7 @@ class _BookPageState extends State<BookPage> {
                   if (book.genre.isNotEmpty) _chip(book.genre),
                   const Spacer(),
                   Text(
-                    '${book.doneChapters}/${book.chapters.length} 章 · ${book.totalWords} 字',
+                    '${book.volumes.length} 篇 · ${book.doneChapters}/${book.totalChapters} 章 · ${book.totalWords} 字',
                     style: const TextStyle(fontSize: 11.5, color: _muted),
                   ),
                 ],
@@ -226,7 +352,7 @@ class _BookPageState extends State<BookPage> {
     final audience = TextEditingController();
     final style = TextEditingController();
     final premise = TextEditingController();
-    final chapters = TextEditingController(text: '12');
+    final chapters = TextEditingController(text: '200');
     final words = TextEditingController(text: '2000');
 
     var inspiring = false;
@@ -278,7 +404,7 @@ class _BookPageState extends State<BookPage> {
                     Row(
                       children: [
                         Expanded(
-                          child: _field(chapters, '计划章数', '12', number: true),
+                          child: _field(chapters, '计划总章数', '200', number: true),
                         ),
                         const SizedBox(width: 12),
                         Expanded(
@@ -471,22 +597,33 @@ class _BookPageState extends State<BookPage> {
             children: [
               _leftPanel(svc, book),
               const VerticalDivider(width: 1),
-              Expanded(
-                child: svc.activeChapter == null
-                    ? _BibleEditor(svc: svc, book: book)
-                    : _ChapterEditor(
-                        key: ValueKey(svc.activeChapter!.id),
-                        svc: svc,
-                        chapter: svc.activeChapter!,
-                        content: svc.activeChapter!.content,
-                        busy: svc.busy,
-                      ),
-              ),
+              Expanded(child: _rightEditor(svc, book)),
             ],
           ),
         ),
       ],
     );
+  }
+
+  Widget _rightEditor(BookService svc, Book book) {
+    if (svc.activeChapter != null) {
+      return _ChapterEditor(
+        key: ValueKey(svc.activeChapter!.id),
+        svc: svc,
+        chapter: svc.activeChapter!,
+        content: svc.activeChapter!.content,
+        busy: svc.busy,
+      );
+    }
+    if (svc.activeVolume != null) {
+      return _VolumeEditor(
+        key: ValueKey(svc.activeVolume!.id),
+        svc: svc,
+        book: book,
+        volume: svc.activeVolume!,
+      );
+    }
+    return _BibleEditor(svc: svc, book: book);
   }
 
   Widget _topBar(BookService svc, Book book) {
@@ -514,7 +651,7 @@ class _BookPageState extends State<BookPage> {
                 ),
                 Text(
                   '${book.genre.isEmpty ? '未分类' : book.genre} · '
-                  '${book.doneChapters}/${book.chapters.length} 章 · 约 ${book.totalWords} 字',
+                  '${book.volumes.length} 篇 · ${book.doneChapters}/${book.totalChapters} 章 · 约 ${book.totalWords} 字',
                   style: const TextStyle(fontSize: 11.5, color: _muted),
                 ),
               ],
@@ -546,7 +683,7 @@ class _BookPageState extends State<BookPage> {
         title: const Text('一键写完全本'),
         content: Text(
           book.chapters.isEmpty
-              ? '将先生成设定集与章节大纲，再依次写完每一章。整本长篇耗时较长，期间可随时点「停止」，已写内容会自动保存。是否开始？'
+              ? '将先生成设定集、篇规划与篇内章节大纲，再按篇依次写完每一章。整本长篇耗时较长，期间可随时点「停止」，已写内容会自动保存。是否开始？'
               : '将依次为剩余 $pending 个未完成章节生成正文（已写章节自动跳过）。'
                     '整本长篇耗时较长，期间可随时点「停止」，每章写完即自动保存。是否开始？',
         ),
@@ -609,8 +746,11 @@ class _BookPageState extends State<BookPage> {
             child: _navTile(
               icon: Icons.menu_book_outlined,
               label: '故事设定集',
-              selected: svc.activeChapter == null,
-              onTap: () => svc.openChapter(null),
+              selected: svc.activeChapter == null && svc.activeVolume == null,
+              onTap: () {
+                svc.openVolume(null);
+                svc.openChapter(null);
+              },
             ),
           ),
           Padding(
@@ -618,7 +758,7 @@ class _BookPageState extends State<BookPage> {
             child: Row(
               children: [
                 const Text(
-                  '章节',
+                  '篇 / 章节',
                   style: TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.w600,
@@ -627,39 +767,42 @@ class _BookPageState extends State<BookPage> {
                 ),
                 const Spacer(),
                 IconButton(
-                  tooltip: '生成 / 重排大纲',
+                  tooltip: '生成 / 重排篇规划',
                   visualDensity: VisualDensity.compact,
-                  onPressed: svc.busy ? null : svc.generateOutline,
-                  icon: const Icon(Icons.auto_awesome, size: 16),
+                  onPressed: svc.busy ? null : svc.generateVolumePlan,
+                  icon: const Icon(Icons.account_tree_outlined, size: 16),
                   color: _accent,
                 ),
               ],
             ),
           ),
           Expanded(
-            child: book.chapters.isEmpty
+            child: book.volumes.isEmpty
                 ? Padding(
                     padding: const EdgeInsets.all(16),
                     child: Column(
                       children: [
                         const Text(
-                          '还没有章节大纲',
+                          '还没有篇规划',
                           style: TextStyle(fontSize: 12.5, color: _muted),
                         ),
                         const SizedBox(height: 10),
                         FilledButton.tonalIcon(
-                          onPressed: svc.busy ? null : svc.generateOutline,
-                          icon: const Icon(Icons.auto_awesome, size: 15),
-                          label: const Text('生成章节大纲'),
+                          onPressed: svc.busy ? null : svc.generateVolumePlan,
+                          icon: const Icon(
+                            Icons.account_tree_outlined,
+                            size: 15,
+                          ),
+                          label: const Text('生成篇规划'),
                         ),
                       ],
                     ),
                   )
                 : ListView.builder(
                     padding: const EdgeInsets.symmetric(horizontal: 8),
-                    itemCount: book.chapters.length,
+                    itemCount: book.volumes.length,
                     itemBuilder: (context, i) =>
-                        _chapterTile(svc, book.chapters[i], i),
+                        _volumeTile(svc, book.volumes[i], i),
                   ),
           ),
         ],
@@ -696,6 +839,63 @@ class _BookPageState extends State<BookPage> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _volumeTile(BookService svc, BookVolume volume, int i) {
+    final selected = svc.activeVolume == volume && svc.activeChapter == null;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      decoration: BoxDecoration(
+        color: selected ? const Color(0xFFE8F5F3) : Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: ExpansionTile(
+        key: PageStorageKey(volume.id),
+        initiallyExpanded:
+            selected || volume.chapters.contains(svc.activeChapter),
+        tilePadding: const EdgeInsets.symmetric(horizontal: 8),
+        childrenPadding: const EdgeInsets.only(left: 8, bottom: 6),
+        leading: Icon(
+          Icons.segment_outlined,
+          size: 17,
+          color: selected ? _accent : _sub,
+        ),
+        title: Text(
+          '${i + 1}. ${volume.title}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+            color: selected ? _accent : _ink,
+          ),
+        ),
+        subtitle: Text(
+          '${volume.doneChapters}/${volume.chapters.length} 章 · 计划 ${volume.chapterCount} 章',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontSize: 11, color: _muted),
+        ),
+        onExpansionChanged: (_) => svc.openVolume(volume),
+        children: [
+          if (volume.chapters.isEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 4, 8, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: svc.busy ? null : svc.generateOutline,
+                  icon: const Icon(Icons.auto_awesome, size: 14),
+                  label: const Text('生成本篇章节大纲'),
+                ),
+              ),
+            )
+          else
+            for (var j = 0; j < volume.chapters.length; j++)
+              _chapterTile(svc, volume.chapters[j], j),
+        ],
       ),
     );
   }
@@ -802,9 +1002,14 @@ class _BibleEditorState extends State<_BibleEditor> {
   final _logline = TextEditingController();
   final _synopsis = TextEditingController();
   final _worldview = TextEditingController();
+  final _discussion = TextEditingController();
+  final _refTitle = TextEditingController();
+  final _refAuthor = TextEditingController();
+  final _refNote = TextEditingController();
   final _loglineFocus = FocusNode();
   final _synopsisFocus = FocusNode();
   final _worldviewFocus = FocusNode();
+  _QuestionDraft? _draft;
 
   @override
   void initState() {
@@ -842,6 +1047,11 @@ class _BibleEditorState extends State<_BibleEditor> {
     _logline.dispose();
     _synopsis.dispose();
     _worldview.dispose();
+    _discussion.dispose();
+    _refTitle.dispose();
+    _refAuthor.dispose();
+    _refNote.dispose();
+    _draft?.dispose();
     _loglineFocus.dispose();
     _synopsisFocus.dispose();
     _worldviewFocus.dispose();
@@ -853,6 +1063,60 @@ class _BibleEditorState extends State<_BibleEditor> {
     widget.book.synopsis = _synopsis.text;
     widget.book.worldview = _worldview.text;
     widget.svc.saveBible();
+  }
+
+  Future<void> _askQuestions() async {
+    final questions = await widget.svc.discussBible(_discussion.text);
+    if (!mounted) return;
+    setState(() {
+      _draft?.dispose();
+      _draft = _QuestionDraft(questions);
+    });
+  }
+
+  Future<void> _applyDiscussion() async {
+    final answer =
+        _draft?.composeAnswer(prefix: _discussion.text) ??
+        _discussion.text.trim();
+    await widget.svc.applyBibleDiscussion(answer);
+    if (!mounted) return;
+    _seed();
+    setState(() {
+      _draft?.dispose();
+      _draft = null;
+      _discussion.clear();
+    });
+  }
+
+  Future<void> _addReference() async {
+    final title = _refTitle.text.trim();
+    if (title.isEmpty) return;
+    try {
+      widget.svc.addReference(
+        title: title,
+        author: _refAuthor.text.trim(),
+        note: _refNote.text.trim(),
+      );
+      _refTitle.clear();
+      _refAuthor.clear();
+      _refNote.clear();
+      if (mounted) setState(() {});
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('添加参考书失败：$e')));
+    }
+  }
+
+  Future<void> _analyzeReference(BookReference ref) async {
+    await widget.svc.analyzeReference(ref);
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _removeReference(BookReference ref) async {
+    await widget.svc.removeReference(ref);
+    if (mounted) setState(() {});
   }
 
   @override
@@ -883,6 +1147,12 @@ class _BibleEditorState extends State<_BibleEditor> {
                 icon: const Icon(Icons.auto_awesome, size: 15),
                 label: Text(book.hasBible ? '重新生成' : '生成设定集'),
               ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                onPressed: busy ? null : _askQuestions,
+                icon: const Icon(Icons.forum_outlined, size: 15),
+                label: const Text('对话完善'),
+              ),
             ],
           ),
           const SizedBox(height: 16),
@@ -895,6 +1165,9 @@ class _BibleEditorState extends State<_BibleEditor> {
                 _box(_synopsis, _synopsisFocus, '主线、核心冲突、转折与结局走向', maxLines: 8),
                 _label('世界观 / 设定'),
                 _box(_worldview, _worldviewFocus, '时代背景、规则、关键设定', maxLines: 6),
+                _referencePanel(busy),
+                _discussionPanel(busy),
+                const SizedBox(height: 8),
                 const SizedBox(height: 8),
                 _label('主要人物'),
                 if (book.characters.isEmpty)
@@ -952,6 +1225,279 @@ class _BibleEditorState extends State<_BibleEditor> {
     );
   }
 
+  Widget _discussionPanel(bool busy) {
+    return Container(
+      margin: const EdgeInsets.only(top: 16),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF7F7F8),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFECECEE)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '总体方向对话',
+            style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            '先让 AI 提出需要确认的问题，再把你的回答应用到故事设定集。适合补强主线、人物群像、反派和长期配角池。',
+            style: TextStyle(fontSize: 12, color: _muted, height: 1.5),
+          ),
+          if (_draft != null) ...[
+            const SizedBox(height: 10),
+            _questionChoiceList(_draft!, () => setState(() {})),
+          ],
+          const SizedBox(height: 10),
+          TextField(
+            controller: _discussion,
+            minLines: 3,
+            maxLines: 6,
+            onChanged: (_) => setState(() {}),
+            style: const TextStyle(fontSize: 13.5, height: 1.5),
+            decoration: const InputDecoration(
+              hintText: '可选：写下整体补充、禁忌、想强化的人物或总体方向…',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              OutlinedButton.icon(
+                onPressed: busy ? null : _askQuestions,
+                icon: const Icon(Icons.help_outline, size: 15),
+                label: const Text('让 AI 追问'),
+              ),
+              FilledButton.icon(
+                onPressed:
+                    busy ||
+                        (_discussion.text.trim().isEmpty &&
+                            !(_draft?.hasAnswers ?? false))
+                    ? null
+                    : _applyDiscussion,
+                style: FilledButton.styleFrom(backgroundColor: _accent),
+                icon: const Icon(Icons.check, size: 15),
+                label: const Text('应用到设定集'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _referencePanel(bool busy) {
+    final refs = widget.book.references;
+    return Container(
+      margin: const EdgeInsets.only(top: 16),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF7F7F8),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFECECEE)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.menu_book_outlined, size: 16, color: _accent),
+              const SizedBox(width: 6),
+              const Text(
+                '参考书目',
+                style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                '${refs.where((r) => r.enabled).length}/${refs.length} 本参与规划',
+                style: const TextStyle(fontSize: 11.5, color: _muted),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            '填写想借鉴的书。系统优先找公版全文；如果只找到网页摘要或书评，只提炼可见线索，不绕过付费、登录或版权限制。',
+            style: TextStyle(fontSize: 12, color: _muted, height: 1.5),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: _smallInput(_refTitle, '书名', '例如：Pride and Prejudice'),
+              ),
+              const SizedBox(width: 8),
+              Expanded(child: _smallInput(_refAuthor, '作者', '可选')),
+            ],
+          ),
+          const SizedBox(height: 8),
+          _smallInput(_refNote, '备注', '想借鉴什么：节奏、人物关系、冲突升级…', maxLines: 2),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerRight,
+            child: FilledButton.icon(
+              onPressed: busy || _refTitle.text.trim().isEmpty
+                  ? null
+                  : _addReference,
+              style: FilledButton.styleFrom(backgroundColor: _accent),
+              icon: const Icon(Icons.add, size: 15),
+              label: const Text('添加参考书'),
+            ),
+          ),
+          if (refs.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            ...refs.map((ref) => _referenceCard(ref, busy)),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _smallInput(
+    TextEditingController c,
+    String label,
+    String hint, {
+    int maxLines = 1,
+  }) {
+    return TextField(
+      controller: c,
+      maxLines: maxLines,
+      onChanged: (_) => setState(() {}),
+      style: const TextStyle(fontSize: 12.5, height: 1.45),
+      decoration: InputDecoration(
+        labelText: label,
+        hintText: hint,
+        isDense: true,
+        border: const OutlineInputBorder(),
+      ),
+    );
+  }
+
+  Widget _referenceCard(BookReference ref, bool busy) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFECECEE)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  ref.author.isEmpty
+                      ? ref.title
+                      : '${ref.title} / ${ref.author}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: _ink,
+                  ),
+                ),
+              ),
+              Switch(
+                value: ref.enabled,
+                activeThumbColor: _accent,
+                onChanged: busy
+                    ? null
+                    : (v) async {
+                        await widget.svc.toggleReference(ref, v);
+                        if (mounted) setState(() {});
+                      },
+              ),
+              IconButton(
+                tooltip: '删除参考书',
+                onPressed: busy ? null : () => _removeReference(ref),
+                icon: const Icon(Icons.delete_outline, size: 18),
+              ),
+            ],
+          ),
+          Text(
+            ref.status,
+            style: TextStyle(
+              fontSize: 11.5,
+              color: ref.status.startsWith('失败') ? Colors.redAccent : _muted,
+            ),
+          ),
+          if (ref.sourceUrl.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              '来源：${ref.sourceLabel.isEmpty ? ref.sourceUrl : ref.sourceLabel} · ${ref.sourceUrl}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 11.5, color: _muted),
+            ),
+          ],
+          if (ref.note.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              '备注：${ref.note}',
+              style: const TextStyle(fontSize: 12, color: _sub, height: 1.45),
+            ),
+          ],
+          if (ref.excerpt.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            _summaryBlock('可见资料摘录', ref.excerpt, maxLines: 4),
+          ],
+          if (ref.patternSummary.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            _summaryBlock('套路总结', ref.patternSummary, maxLines: 8),
+          ],
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerRight,
+            child: OutlinedButton.icon(
+              onPressed: busy ? null : () => _analyzeReference(ref),
+              icon: const Icon(Icons.travel_explore, size: 15),
+              label: Text(ref.patternSummary.isEmpty ? '联网查找并总结' : '重新查找并总结'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _summaryBlock(String title, String text, {int maxLines = 5}) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF7F7F8),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              fontSize: 11.5,
+              color: _accent,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 4),
+          SelectableText(
+            text,
+            maxLines: maxLines,
+            style: const TextStyle(fontSize: 12, color: _sub, height: 1.45),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _characterCard(BookCharacter c) {
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
@@ -981,6 +1527,321 @@ class _BibleEditorState extends State<_BibleEditor> {
                   style: const TextStyle(fontSize: 11.5, color: _accent),
                 ),
               ],
+            ],
+          ),
+          if (c.description.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              c.description,
+              style: const TextStyle(fontSize: 12.5, height: 1.5, color: _sub),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 篇详情编辑器
+// -----------------------------------------------------------------------------
+
+class _VolumeEditor extends StatefulWidget {
+  const _VolumeEditor({
+    super.key,
+    required this.svc,
+    required this.book,
+    required this.volume,
+  });
+
+  final BookService svc;
+  final Book book;
+  final BookVolume volume;
+
+  @override
+  State<_VolumeEditor> createState() => _VolumeEditorState();
+}
+
+class _VolumeEditorState extends State<_VolumeEditor> {
+  late final _title = TextEditingController(text: widget.volume.title);
+  late final _theme = TextEditingController(text: widget.volume.theme);
+  late final _direction = TextEditingController(text: widget.volume.direction);
+  late final _summary = TextEditingController(text: widget.volume.summary);
+  late final _chapterCount = TextEditingController(
+    text: widget.volume.chapterCount.toString(),
+  );
+  final _discussion = TextEditingController();
+  _QuestionDraft? _draft;
+
+  @override
+  void dispose() {
+    _title.dispose();
+    _theme.dispose();
+    _direction.dispose();
+    _summary.dispose();
+    _chapterCount.dispose();
+    _discussion.dispose();
+    _draft?.dispose();
+    super.dispose();
+  }
+
+  void _seed() {
+    _title.text = widget.volume.title;
+    _theme.text = widget.volume.theme;
+    _direction.text = widget.volume.direction;
+    _summary.text = widget.volume.summary;
+    _chapterCount.text = widget.volume.chapterCount.toString();
+  }
+
+  void _save() {
+    widget.volume.title = _title.text.trim().isEmpty
+        ? widget.volume.title
+        : _title.text.trim();
+    widget.volume.theme = _theme.text.trim();
+    widget.volume.direction = _direction.text.trim();
+    widget.volume.summary = _summary.text.trim();
+    final count = int.tryParse(_chapterCount.text.trim());
+    if (count != null && count > 0) widget.volume.chapterCount = count;
+    widget.svc.saveVolume();
+  }
+
+  Future<void> _askQuestions() async {
+    _save();
+    final questions = await widget.svc.discussVolume(
+      widget.volume,
+      _discussion.text,
+    );
+    if (!mounted) return;
+    setState(() {
+      _draft?.dispose();
+      _draft = _QuestionDraft(questions);
+    });
+  }
+
+  Future<void> _applyDiscussion() async {
+    _save();
+    final answer =
+        _draft?.composeAnswer(prefix: _discussion.text) ??
+        _discussion.text.trim();
+    await widget.svc.applyVolumeDiscussion(widget.volume, answer);
+    if (!mounted) return;
+    _seed();
+    setState(() {
+      _draft?.dispose();
+      _draft = null;
+      _discussion.clear();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final busy = widget.svc.busy;
+    final volume = widget.volume;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(28, 20, 28, 20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  volume.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: busy ? null : _askQuestions,
+                icon: const Icon(Icons.forum_outlined, size: 15),
+                label: const Text('对话完善本篇'),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.icon(
+                onPressed: busy ? null : widget.svc.generateOutline,
+                style: FilledButton.styleFrom(backgroundColor: _accent),
+                icon: const Icon(Icons.auto_awesome, size: 15),
+                label: Text(volume.chapters.isEmpty ? '生成本篇大纲' : '重排本篇大纲'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Expanded(
+            child: ListView(
+              children: [
+                Row(
+                  children: [
+                    Expanded(child: _field(_title, '篇名', '第一篇')),
+                    const SizedBox(width: 12),
+                    SizedBox(
+                      width: 140,
+                      child: _field(_chapterCount, '计划章数', '50', number: true),
+                    ),
+                  ],
+                ),
+                _field(_theme, '本篇主题', '例如：信任崩塌、第一次反攻、离开故乡'),
+                _field(_direction, '本篇方向', '开局状态、阶段目标、核心冲突、篇尾状态', maxLines: 4),
+                _field(_summary, '本篇梗概', '本篇主要事件与人物变化', maxLines: 6),
+                _discussionPanel(busy),
+                const SizedBox(height: 14),
+                const Text(
+                  '本篇人物与配角',
+                  style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 8),
+                if (volume.characters.isEmpty)
+                  const Text(
+                    '还没有篇人物。先通过「对话完善本篇」补充配角、反派、盟友和功能性人物。',
+                    style: TextStyle(fontSize: 12.5, color: _muted),
+                  )
+                else
+                  ...volume.characters.map(_characterCard),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _field(
+    TextEditingController c,
+    String label,
+    String hint, {
+    int maxLines = 1,
+    bool number = false,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w600,
+              color: _ink,
+            ),
+          ),
+          const SizedBox(height: 6),
+          TextField(
+            controller: c,
+            maxLines: maxLines,
+            keyboardType: number ? TextInputType.number : null,
+            onTapOutside: (_) => _save(),
+            onEditingComplete: _save,
+            style: const TextStyle(fontSize: 13.5, height: 1.45),
+            decoration: InputDecoration(
+              hintText: hint,
+              border: const OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _discussionPanel(bool busy) {
+    return Container(
+      margin: const EdgeInsets.only(top: 4, bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF7F7F8),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFECECEE)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '本篇方向对话',
+            style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            '每篇通常约 50 章。先讨论本篇主题、阶段目标、配角配置和篇尾状态，再生成章节大纲。',
+            style: TextStyle(fontSize: 12, color: _muted, height: 1.5),
+          ),
+          if (_draft != null) ...[
+            const SizedBox(height: 10),
+            _questionChoiceList(_draft!, () => setState(() {})),
+          ],
+          const SizedBox(height: 10),
+          TextField(
+            controller: _discussion,
+            minLines: 3,
+            maxLines: 6,
+            onChanged: (_) => setState(() {}),
+            style: const TextStyle(fontSize: 13.5, height: 1.5),
+            decoration: const InputDecoration(
+              hintText: '可选：写下你对本篇主题、配角、冲突、伏笔和结尾状态的补充…',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              OutlinedButton.icon(
+                onPressed: busy ? null : _askQuestions,
+                icon: const Icon(Icons.help_outline, size: 15),
+                label: const Text('让 AI 追问'),
+              ),
+              FilledButton.icon(
+                onPressed:
+                    busy ||
+                        (_discussion.text.trim().isEmpty &&
+                            !(_draft?.hasAnswers ?? false))
+                    ? null
+                    : _applyDiscussion,
+                style: FilledButton.styleFrom(backgroundColor: _accent),
+                icon: const Icon(Icons.check, size: 15),
+                label: const Text('应用到本篇'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _characterCard(BookCharacter c) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF7F7F8),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.group_outlined, size: 15, color: _accent),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  c.name,
+                  style: const TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              if (c.role.isNotEmpty)
+                Text(
+                  c.role,
+                  style: const TextStyle(fontSize: 11.5, color: _accent),
+                ),
             ],
           ),
           if (c.description.isNotEmpty) ...[

@@ -15,16 +15,49 @@ import 'messages.dart';
 /// - 小模型（`small: true`）：使用通用默认模型（`baseUrl/apiKey/model`，内置 DeepSeek），
 ///   用于记忆「选择题/抽取」这类廉价任务，对应 Claude Code「用小模型做选择」的设计。
 class ModelClient {
-  ModelClient(this.settings, {this.small = false});
+  /// [role] 决定走哪条模型通道（见 [ModelRole]）。
+  /// 兼容旧调用：不传 role 时，`small: true` → small 通道，否则 → agent 通道，
+  /// 与改造前「small=默认DeepSeek / 否则=实验模型」的语义一致。
+  ModelClient(this.settings, {this.small = false, ModelRole? role})
+      : role = role ?? (small ? ModelRole.small : ModelRole.agent);
 
   final SettingsService settings;
 
-  /// 是否走小模型通道（记忆选择/抽取等廉价任务）。
+  /// 是否走小模型通道（记忆选择/抽取等廉价任务）。保留以兼容旧调用。
   final bool small;
 
-  String get _baseUrl => small ? settings.baseUrl : settings.experimentBaseUrl;
-  String get _apiKey => small ? settings.apiKey : settings.experimentApiKey;
-  String get _model => small ? settings.model : settings.experimentModel;
+  /// 本客户端服务的任务角色，决定模型/供应商。
+  final ModelRole role;
+
+  String get _baseUrl => settings.roleBaseUrl(role);
+  String get _apiKey => settings.roleApiKey(role);
+  String get _model => settings.roleModel(role);
+
+  /// 一次性（非工具）补全：内部复用 [stream]，统一了过去散落在各 service 里
+  /// 重复的 `/chat/completions` 接入逻辑（超时、错误处理、SSE 解析）。
+  /// 传 [system]/[user] 或直接传完整 [messages] 二选一。
+  Future<String> complete({
+    String? system,
+    String? user,
+    List<Map<String, dynamic>>? messages,
+    bool jsonMode = false,
+    bool Function()? isCancelled,
+    Duration timeout = const Duration(minutes: 3),
+  }) async {
+    final msgs =
+        messages ??
+        <Map<String, dynamic>>[
+          if (system != null) {'role': 'system', 'content': system},
+          if (user != null) {'role': 'user', 'content': user},
+        ];
+    final turn = await stream(
+      messages: msgs,
+      jsonMode: jsonMode,
+      isCancelled: isCancelled,
+      timeout: timeout,
+    );
+    return turn.content.trim();
+  }
 
   /// 流式发起一轮对话。
   /// - [messages]：完整消息数组（API 形态）。

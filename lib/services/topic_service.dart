@@ -10,6 +10,8 @@ import 'package:pdfrx/pdfrx.dart';
 
 import '../models.dart';
 import 'agent/memory/memory_service.dart';
+import 'agent/model_client.dart';
+import 'web_reader.dart';
 import 'file_library_service.dart';
 import 'library_service.dart';
 import 'playwright_service.dart';
@@ -184,6 +186,11 @@ class TopicFetchService extends ChangeNotifier {
   File? _store;
   String? _pendingReportPath;
 
+  // 供 Agent 的 deep_research 工具复用主题研究流程：
+  // _logSink 把进度转发给工具调用方；_lastReport 暂存最近一次综合出的报告正文。
+  void Function(String line)? _logSink;
+  String? _lastReport;
+
   /// 研究完成后回调，参数为研究报告笔记的文件路径（用于自动跳转查看）。
   void Function(String reportNotePath)? onResearchComplete;
 
@@ -193,6 +200,13 @@ class TopicFetchService extends ChangeNotifier {
 
   final Map<String, BrowserResearchResult> _browserReadsByUrl = {};
   final Map<String, String> _browserNotesByUrl = {};
+
+  /// 已经在「直接读取主题内网址」阶段用 Jina/README 读过的网址，
+  /// 后续收集流程据此跳过，避免对同一网址重复抓取。
+  final Set<String> _directReadUrls = {};
+
+  // 共享的网页正文读取器（Jina Reader），与 Agent 的 read_url 工具同源。
+  final WebReader _webReader = WebReader();
 
   Future<void> init() async {
     final dir = await getApplicationSupportDirectory();
@@ -256,6 +270,7 @@ class TopicFetchService extends ChangeNotifier {
 
   void _log(String msg) {
     logs.add(msg);
+    _logSink?.call(msg); // 若由 Agent 工具发起，则同步把进度回传给工具调用方。
     notifyListeners();
   }
 
@@ -313,8 +328,10 @@ class TopicFetchService extends ChangeNotifier {
     running = true;
     viewing = null;
     _pendingReportPath = null;
+    _lastReport = null;
     _browserReadsByUrl.clear();
     _browserNotesByUrl.clear();
+    _directReadUrls.clear();
     var researchTitle = topic;
     logs.clear();
     notifyListeners();
@@ -382,6 +399,21 @@ class TopicFetchService extends ChangeNotifier {
         _log('  Zotero 未运行或未开放本地通信，跳过文库检索。');
       }
 
+      // 借鉴 Agent-Reach：用户常以「解读 https://… 」给定要研究的页面，
+      // 应直接打开读取其正文（GitHub 走 README，其余走 Jina Reader），
+      // 而不是把含网址的长句丢给搜索引擎——那正是检索结果极差的根源之一。
+      // 这些是最贴题的种子资料，直接并入线索与已研读摘录。
+      final directExcerpts = await _readTopicUrls(
+        topic,
+        clarification,
+        category,
+        researchTitle,
+        pwReady,
+      );
+      for (final e in directExcerpts) {
+        if (seenUrls.add(e.$1.url)) findings.add(e.$1);
+      }
+
       final rounds = await _deepResearchLoop(
         topic: topic,
         researchTitle: researchTitle,
@@ -432,10 +464,11 @@ class TopicFetchService extends ChangeNotifier {
         topic,
         angles,
         valued.map((v) => v.result).toList(),
-        collected.excerpts,
+        [...directExcerpts, ...collected.excerpts],
         clarification,
         highValue,
       );
+      _lastReport = report; // 暂存正文，供 deep_research 工具取回。
       final notePath = await _saveReport(
         researchTitle,
         topic,
@@ -490,6 +523,33 @@ class TopicFetchService extends ChangeNotifier {
       await _persist();
       notifyListeners();
     }
+  }
+
+  /// 供 Agent（如「计划」执行器）调用的无界面主题研究：
+  /// 复用现有 [run] 整条流程（报告同样会存入知识库），把进度通过 [log] 回传，
+  /// 并返回综合出的报告正文。执行期间临时摘除 UI 跳转回调，避免打扰界面。
+  Future<String> researchForAgent(
+    String topic, {
+    String clarification = '',
+    void Function(String line)? log,
+  }) async {
+    if (running) {
+      throw StateError('已有主题研究正在进行，请稍后再试');
+    }
+    final savedCallback = onResearchComplete;
+    onResearchComplete = null; // 由 Agent 发起时不联动界面跳转。
+    _logSink = log;
+    try {
+      await run(topic, clarification: clarification);
+    } finally {
+      _logSink = null;
+      onResearchComplete = savedCallback;
+    }
+    final report = _lastReport;
+    if (report == null || report.trim().isEmpty) {
+      throw StateError('未能产出研究报告，请换一种表述再试');
+    }
+    return report;
   }
 
   /// 图谱缺失补全：把每个待补文件名作为检索词下载补全。
@@ -683,7 +743,8 @@ $profileDesc
     }
     items.addAll(_profileSeedItems(topic, angles, effectiveProfiles));
     if (_looksChinese(topic) && !items.any((e) => e.source == SourceId.cnki)) {
-      items.insert(0, _PlanItem(SourceId.cnki, topic));
+      // 用短关键词而不是整段主题作为知网检索词（整段含网址的长句会让知网/搜索返回噪声）。
+      items.insert(0, _PlanItem(SourceId.cnki, _searchKeywords(topic, angles)));
     }
     return _ResearchPlan(
       category: category.isEmpty ? '其他' : category,
@@ -738,7 +799,7 @@ $profileDesc
     List<String> angles,
     List<ResearchSourceProfile> profiles,
   ) {
-    final query = _compactQuery([topic, ...angles].join(' '));
+    final query = _searchKeywords(topic, angles);
     final out = <_PlanItem>[];
     for (final profile in profiles) {
       for (final source in profile.preferredSources.take(3)) {
@@ -776,6 +837,27 @@ $profileDesc
 
   String _compactQuery(String value) =>
       value.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+  /// 构造用于网页/站点检索的「短关键词查询」。
+  /// 先剥离 URL，再只取主题里的少量核心关键词（按词频/长度排序、最多 6 个/约 48 字）。
+  /// 这是搜索结果极差的另一根源的修复点：把整段含网址的长句丢给搜索引擎只会得到噪声，
+  /// site: 模板也必须套在这种短查询上才有意义。
+  String _searchKeywords(String topic, List<String> angles) {
+    final noUrl = '$topic ${angles.join(' ')}'.replaceAll(
+      RegExp(r'https?://\S+'),
+      ' ',
+    );
+    final picked = <String>[];
+    var len = 0;
+    for (final t in _keywordTerms([noUrl])) {
+      if (picked.contains(t)) continue;
+      picked.add(t);
+      len += t.length + 1;
+      if (picked.length >= 6 || len >= 48) break;
+    }
+    final out = picked.join(' ').trim();
+    return out.isEmpty ? _compactQuery(noUrl) : out;
+  }
 
   // ---------- 检索 ----------
 
@@ -1554,6 +1636,8 @@ $sourceText
     for (final valuedSource in valued) {
       var r = valuedSource.result;
       final highValue = valuedSource.highValue;
+      // 主题内网址已在前面用 Jina/README 直接读过并存档，跳过避免重复抓取。
+      if (_directReadUrls.contains(r.url)) continue;
       if (r.source == SourceId.cnki) {
         if (cnkiRefs >= _maxDownloads || _existsInLibrary(r.title)) continue;
         if (pwReady) {
@@ -1691,6 +1775,35 @@ $sourceText
           }
           downloaded.add((r, relPath));
           _log('    已保存浏览阅读摘录与笔记。');
+          if (zoteroOn && await _saveToZotero(topic, r, null)) zoteroSaved++;
+          continue;
+        }
+        // 网页正文「首选」用 Jina Reader 抓取干净 Markdown（借鉴 Agent-Reach：r.jina.ai/URL）。
+        // 拿到的是清洗后的正文而非一堆 HTML 标签——这是抓取质量提升最大的一步。
+        // 仅当 Jina 拿不到正文时，才退回下面的 Playwright 渲染/阅读路径。
+        final jinaText = await _readWithJina(r.url);
+        if (jinaText != null) {
+          _log('  用 Jina Reader 读取网页正文：${r.title}');
+          final relPath = await fileLibrary.saveDownloaded(
+            '${_sanitize(r.title)}.md',
+            Uint8List.fromList(utf8.encode(jinaText)),
+          );
+          final notePath = await _fileNote(
+            r,
+            category,
+            relPath,
+            'text',
+            research: researchTitle,
+            highValue: highValue,
+          );
+          downloaded.add((r, relPath));
+          textNotes.add(notePath);
+          final clean = jinaText.replaceAll(RegExp(r'\s+'), ' ').trim();
+          excerpts.add((
+            r,
+            clean.length > 2600 ? '${clean.substring(0, 2600)}…' : clean,
+          ));
+          _log('    已用 Jina Reader 读取正文（${clean.length} 字）。');
           if (zoteroOn && await _saveToZotero(topic, r, null)) zoteroSaved++;
           continue;
         }
@@ -2442,6 +2555,103 @@ $body''';
     }
   }
 
+  /// 用 Jina Reader 读取任意网页，返回清洗后的 Markdown 正文。
+  /// 借鉴 Agent-Reach 的 web 渠道：把目标 URL 前缀上 https://r.jina.ai/ 即可，
+  /// 免 API Key、免本地浏览器，返回的是去掉导航/广告/脚本后的正文。
+  /// 拿不到正文（非 200 或内容过短）时返回 null，由调用方决定是否退回 Playwright。
+  // 网页正文读取已统一到共享的 [WebReader]（见 lib/services/web_reader.dart），
+  // 这里仅做薄封装，便于本文件内部沿用原方法名。
+  Future<String?> _readWithJina(String url) => _webReader.readMarkdown(url);
+
+  /// 从 Jina/Markdown 文本里取标题（委托共享 WebReader）。
+  String? _titleFromMarkdown(String text) => _webReader.titleFromMarkdown(text);
+
+  /// 直接读取用户写在研究主题/澄清里的网址（借鉴 Agent-Reach：URL 用 Jina Reader 读干净正文）。
+  /// GitHub 仓库优先走 README API；其余网页走 Jina Reader，失败再退回 Playwright。
+  /// 把每个网址存为研读资料 + 笔记，并登记进 _directReadUrls 以免后续重复抓取；
+  /// 返回 (来源, 正文摘录) 列表，作为最贴题的种子资料并入综合分析。
+  Future<List<(SourceResult, String)>> _readTopicUrls(
+    String topic,
+    String clarification,
+    String category,
+    String researchTitle,
+    bool pwReady,
+  ) async {
+    final urls = RegExp(r'https?://[^\s，,）)】\]"]+')
+        .allMatches('$topic\n$clarification')
+        .map((m) => m.group(0)!.trim())
+        .toSet();
+    if (urls.isEmpty) return const [];
+    _log('  主题中包含 ${urls.length} 个网址，直接读取其正文（Jina Reader / GitHub）：');
+    final out = <(SourceResult, String)>[];
+    for (final url in urls) {
+      if (out.length >= 4) break;
+      try {
+        // GitHub 仓库优先用 README（正文更结构化）；其余网页用 Jina Reader。
+        final ghm = RegExp(r'github\.com/([^/]+/[^/#?]+)').firstMatch(url);
+        String? body;
+        String title;
+        SourceId src;
+        if (ghm != null) {
+          final repo = ghm.group(1)!.replaceAll(RegExp(r'\.git$'), '');
+          body = await _fetchGithubReadme(repo, url);
+          title = repo;
+          src = SourceId.github;
+        } else {
+          body = await _readWithJina(url);
+          title = _titleFromMarkdown(body ?? '') ?? Uri.parse(url).host;
+          src = SourceId.web;
+        }
+        // 拿不到正文则退回 Playwright（用户已选：Jina 为首选，失败再退回）。
+        if ((body == null || body.trim().length < 50) && pwReady) {
+          final read = await playwright.readPage(
+            url,
+            onLoginRequired: onLoginRequired,
+          );
+          if (read != null) {
+            body = read.visibleText.isNotEmpty
+                ? read.visibleText
+                : read.excerpt;
+          }
+        }
+        if (body == null || body.trim().length < 50) {
+          _log('    读取失败：$url');
+          continue;
+        }
+        final relPath = await fileLibrary.saveDownloaded(
+          '${_sanitize(title)}.md',
+          Uint8List.fromList(utf8.encode(body)),
+        );
+        final r = SourceResult(
+          title: title,
+          url: url,
+          source: src,
+          ext: '',
+          summary: '用户在研究主题中直接指定的网址，已读取正文。',
+          landingUrl: url,
+        );
+        await _fileNote(
+          r,
+          category,
+          relPath,
+          'text',
+          research: researchTitle,
+          highValue: true,
+        );
+        _directReadUrls.add(url);
+        final clean = body.replaceAll(RegExp(r'\s+'), ' ').trim();
+        out.add((
+          r,
+          clean.length > 2600 ? '${clean.substring(0, 2600)}…' : clean,
+        ));
+        _log('    已读取并保存：$title（${clean.length} 字）');
+      } catch (e) {
+        _log('    读取出错：$url（$e）');
+      }
+    }
+    return out;
+  }
+
   Future<Uint8List?> _download(String url, String ext) async {
     try {
       final resp = await http
@@ -2501,41 +2711,13 @@ $body''';
     bool jsonMode = false,
     bool useExperimentModel = false,
   }) async {
-    final baseUrl = useExperimentModel
-        ? settings.experimentBaseUrl
-        : settings.baseUrl;
-    final apiKey = useExperimentModel
-        ? settings.experimentApiKey
-        : settings.apiKey;
-    final model = useExperimentModel
-        ? settings.experimentModel
-        : settings.model;
-    final response = await http
-        .post(
-          Uri.parse(
-            '${baseUrl.replaceFirst(RegExp(r'/+$'), '')}/chat/completions',
-          ),
-          headers: {
-            'Authorization': 'Bearer $apiKey',
-            'Content-Type': 'application/json',
-          },
-          body: jsonEncode({
-            'model': model,
-            'stream': false,
-            if (jsonMode) 'response_format': {'type': 'json_object'},
-            'messages': messages,
-          }),
-        )
-        .timeout(const Duration(minutes: 3));
-    if (response.statusCode != 200) {
-      throw Exception(
-        'HTTP ${response.statusCode} ${utf8.decode(response.bodyBytes)}',
-      );
-    }
-    final json =
-        jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-    final content =
-        (json['choices']?[0]?['message']?['content'] as String? ?? '').trim();
+    // 统一走 ModelClient：浏览研究/视觉判断用 agent（实验）通道，
+    // 其余研究规划/综合用 research 通道（默认仍是 DeepSeek，可在设置里改）。
+    final role = useExperimentModel ? ModelRole.agent : ModelRole.research;
+    final content = await ModelClient(
+      settings,
+      role: role,
+    ).complete(messages: messages, jsonMode: jsonMode);
     if (content.isEmpty) throw Exception('模型未返回内容');
     return content;
   }

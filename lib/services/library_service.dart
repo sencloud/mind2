@@ -2,10 +2,10 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 
 import '../models.dart';
+import 'agent/model_client.dart';
 import 'settings_service.dart';
 
 class LibraryService extends ChangeNotifier {
@@ -319,36 +319,20 @@ class LibraryService extends ChangeNotifier {
       ..writeln('知识库目录：')
       ..write(catalog);
 
-    final response = await http.post(
-      Uri.parse('${settings.baseUrl}/chat/completions'),
-      headers: {
-        'Authorization': 'Bearer ${settings.apiKey}',
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode({
-        'model': settings.model,
-        'stream': false,
-        'messages': [
-          {
-            'role': 'system',
-            'content':
-                '你是一名资深的跨领域文献研究专家，熟悉中国的标准体系、政策文件与行业报告。'
-                '回答必须基于你对该文件的真实了解，准确、专业、面向学习场景；'
-                '若对个别细节不确定，宁可概括也不要编造具体条款号。始终用中文。',
-          },
-          {'role': 'user', 'content': prompt.toString()},
-        ],
-      }),
-    );
-    if (response.statusCode != 200) {
-      throw Exception(
-        'HTTP ${response.statusCode} ${utf8.decode(response.bodyBytes)}',
-      );
-    }
-    final json =
-        jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-    var content = (json['choices']?[0]?['message']?['content'] as String? ?? '')
-        .trim();
+    var content =
+        (await ModelClient(settings, role: ModelRole.writing).complete(
+      messages: [
+        {
+          'role': 'system',
+          'content':
+              '你是一名资深的跨领域文献研究专家，熟悉中国的标准体系、政策文件与行业报告。'
+              '回答必须基于你对该文件的真实了解，准确、专业、面向学习场景；'
+              '若对个别细节不确定，宁可概括也不要编造具体条款号。始终用中文。',
+        },
+        {'role': 'user', 'content': prompt.toString()},
+      ],
+    ))
+            .trim();
     if (content.isEmpty) throw Exception('模型未返回内容');
     content = content
         .replaceFirst(RegExp(r'^```(?:markdown)?\s*'), '')
@@ -402,35 +386,19 @@ ${_clipForPrompt(note.body, 18000)}
 关联参考资料摘要：
 ${refs.isEmpty ? '（无）' : refs.toString()}
 ''';
-    final response = await http.post(
-      Uri.parse('${settings.baseUrl}/chat/completions'),
-      headers: {
-        'Authorization': 'Bearer ${settings.apiKey}',
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode({
-        'model': settings.model,
-        'stream': false,
-        'messages': [
-          {
-            'role': 'system',
-            'content':
-                '你是资深信息架构师和演示文稿设计师。'
-                '你熟悉 html-ppt-skill 的静态 HTML deck 规范，输出必须是可直接保存打开的完整 HTML。',
-          },
-          {'role': 'user', 'content': prompt},
-        ],
-      }),
-    );
-    if (response.statusCode != 200) {
-      throw Exception(
-        'HTTP ${response.statusCode} ${utf8.decode(response.bodyBytes)}',
-      );
-    }
-    final json =
-        jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-    var content = (json['choices']?[0]?['message']?['content'] as String? ?? '')
-        .trim();
+    var content =
+        (await ModelClient(settings, role: ModelRole.writing).complete(
+      messages: [
+        {
+          'role': 'system',
+          'content':
+              '你是资深信息架构师和演示文稿设计师。'
+              '你熟悉 html-ppt-skill 的静态 HTML deck 规范，输出必须是可直接保存打开的完整 HTML。',
+        },
+        {'role': 'user', 'content': prompt},
+      ],
+    ))
+            .trim();
     content = content
         .replaceFirst(RegExp(r'^```(?:html)?\s*', caseSensitive: false), '')
         .replaceFirst(RegExp(r'\s*```$'), '')
@@ -656,29 +624,13 @@ ${cats.map((c) => '- $c').join('\n')}
   Future<String> _chatRaw(
     List<Map<String, String>> messages, {
     bool jsonMode = false,
-  }) async {
-    final response = await http
-        .post(
-          Uri.parse('${settings.baseUrl}/chat/completions'),
-          headers: {
-            'Authorization': 'Bearer ${settings.apiKey}',
-            'Content-Type': 'application/json',
-          },
-          body: jsonEncode({
-            'model': settings.model,
-            'stream': false,
-            if (jsonMode) 'response_format': {'type': 'json_object'},
-            'messages': messages,
-          }),
-        )
-        .timeout(const Duration(minutes: 2));
-    if (response.statusCode != 200) {
-      throw Exception('HTTP ${response.statusCode}');
-    }
-    final json =
-        jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-    return (json['choices']?[0]?['message']?['content'] as String? ?? '')
-        .trim();
+  }) {
+    // 分类合并属于廉价小任务，走 small 通道。
+    return ModelClient(settings, role: ModelRole.small).complete(
+      messages: messages.map((m) => Map<String, dynamic>.from(m)).toList(),
+      jsonMode: jsonMode,
+      timeout: const Duration(minutes: 2),
+    );
   }
 
   /// 保留原文链接与「我的笔记」内容，替换中间的生成部分。

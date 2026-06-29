@@ -13,6 +13,7 @@ import 'services/experiment_service.dart';
 import 'services/file_library_service.dart';
 import 'services/library_service.dart';
 import 'services/paper_service.dart';
+import 'services/plan_service.dart';
 import 'services/platform_capabilities.dart';
 import 'services/playwright_service.dart';
 import 'services/project_service.dart';
@@ -70,6 +71,8 @@ Future<void> main() async {
   final document = DocumentService(settings);
   final book = BookService(settings);
   final paper = PaperService(settings);
+  // 「计划」：每日待办 + AI 分析并执行（复用统一 Agent 内核）。
+  final plan = PlanService(settings, memory, research: topic);
   await chat.init();
   await topic.init();
   if (PlatformCapabilities.supportsExperiment) {
@@ -81,6 +84,7 @@ Future<void> main() async {
   await document.init();
   await book.init();
   await paper.init();
+  await plan.init();
   unawaited(library.reload());
   unawaited(fileLibrary.reload());
   runApp(
@@ -97,6 +101,7 @@ Future<void> main() async {
       document: document,
       book: book,
       paper: paper,
+      plan: plan,
     ),
   );
 }
@@ -118,6 +123,7 @@ class MindApp extends StatelessWidget {
     required this.document,
     required this.book,
     required this.paper,
+    required this.plan,
   });
 
   final SettingsService settings;
@@ -132,6 +138,7 @@ class MindApp extends StatelessWidget {
   final DocumentService document;
   final BookService book;
   final PaperService paper;
+  final PlanService plan;
 
   @override
   Widget build(BuildContext context) {
@@ -172,6 +179,7 @@ class MindApp extends StatelessWidget {
               document: document,
               book: book,
               paper: paper,
+              plan: plan,
             ),
     );
   }

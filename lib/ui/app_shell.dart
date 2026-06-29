@@ -9,6 +9,7 @@ import '../services/experiment_service.dart';
 import '../services/file_library_service.dart';
 import '../services/library_service.dart';
 import '../services/paper_service.dart';
+import '../services/plan_service.dart';
 import '../services/playwright_service.dart';
 import '../services/project_service.dart';
 import '../services/settings_service.dart';
@@ -17,6 +18,7 @@ import '../services/zotero_service.dart';
 import 'chat_page.dart';
 import 'knowledge_page.dart';
 import 'library_page.dart';
+import 'plan_page.dart';
 import 'project_page.dart';
 import 'settings_page.dart';
 import 'topic_page.dart';
@@ -37,6 +39,7 @@ class AppShell extends StatefulWidget {
     required this.document,
     required this.book,
     required this.paper,
+    required this.plan,
   });
 
   final SettingsService settings;
@@ -51,6 +54,7 @@ class AppShell extends StatefulWidget {
   final DocumentService document;
   final BookService book;
   final PaperService paper;
+  final PlanService plan;
 
   @override
   State<AppShell> createState() => _AppShellState();
@@ -157,6 +161,7 @@ class _AppShellState extends State<AppShell> {
         paper: widget.paper,
         initialTab: _writingTab,
       ),
+      PlanPage(plan: widget.plan),
     ];
 
     return Scaffold(
@@ -251,6 +256,13 @@ class _AppShellState extends State<AppShell> {
             selected: _index == 3,
             collapsed: collapsed,
             onTap: () => setState(() => _index = 3),
+          ),
+          _NavItem(
+            icon: Icons.checklist_rtl,
+            label: '计划',
+            selected: _index == 7,
+            collapsed: collapsed,
+            onTap: () => setState(() => _index = 7),
           ),
           _NavItem(
             icon: Icons.auto_stories_outlined,

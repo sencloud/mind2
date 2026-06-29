@@ -712,16 +712,18 @@ ${draft.references.isEmpty ? '' : '参考资料如下，请优先依据这些资
   }
 
   Future<String> _chat(List<Map<String, String>> messages) async {
+    // 正式文档生成走 writing 角色通道（默认仍是 DeepSeek，可在设置里改）。
+    const role = ModelRole.writing;
     final client = _client = http.Client();
     try {
       final resp = await client.post(
-        Uri.parse('${settings.baseUrl}/chat/completions'),
+        Uri.parse('${settings.roleBaseUrl(role)}/chat/completions'),
         headers: {
-          'Authorization': 'Bearer ${settings.apiKey}',
+          'Authorization': 'Bearer ${settings.roleApiKey(role)}',
           'Content-Type': 'application/json',
         },
         body: jsonEncode({
-          'model': settings.model,
+          'model': settings.roleModel(role),
           'stream': false,
           'messages': messages,
         }),

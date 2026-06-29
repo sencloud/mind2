@@ -5,6 +5,7 @@ import 'memory/memory_service.dart';
 import 'memory/memory_store.dart';
 import 'messages.dart';
 import 'model_client.dart';
+import '../topic_service.dart';
 import 'permissions.dart';
 import 'reporter.dart';
 import 'tool.dart';
@@ -17,10 +18,13 @@ import 'toolset.dart';
 ///
 /// 领域 service 只负责组织领域 system prompt / 任务消息，再调用本类。
 class AgentRunner {
-  AgentRunner({required this.model, required this.memory});
+  AgentRunner({required this.model, required this.memory, this.research});
 
   final ModelClient model;
   final MemoryService memory;
+
+  /// 可选的主题研究服务；传入后 agent 将获得 deep_research 工具。
+  final TopicFetchService? research;
 
   /// 跑一次完整会话（含记忆回忆与抽取）。
   ///
@@ -80,6 +84,7 @@ class AgentRunner {
       model: model,
       maxDepth: maxDepth,
       subAgentMaxTurns: subAgentMaxTurns,
+      research: research,
     );
     final registry = toolset.buildRegistry('general', 0);
     final executor = ToolExecutor(

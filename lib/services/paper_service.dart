@@ -1175,16 +1175,18 @@ ${_clip(draft.sourceBody, 16000)}
     List<Map<String, String>> messages, {
     bool jsonMode = false,
   }) async {
+    // 论文写作类一次性调用走 writing 角色通道（默认仍是 DeepSeek，可在设置里改）。
+    const role = ModelRole.writing;
     final client = _client = http.Client();
     try {
       final resp = await client.post(
-        Uri.parse('${settings.baseUrl}/chat/completions'),
+        Uri.parse('${settings.roleBaseUrl(role)}/chat/completions'),
         headers: {
-          'Authorization': 'Bearer ${settings.apiKey}',
+          'Authorization': 'Bearer ${settings.roleApiKey(role)}',
           'Content-Type': 'application/json',
         },
         body: jsonEncode({
-          'model': settings.model,
+          'model': settings.roleModel(role),
           'stream': false,
           if (jsonMode) 'response_format': {'type': 'json_object'},
           'messages': messages,
@@ -1209,14 +1211,16 @@ ${_clip(draft.sourceBody, 16000)}
   }
 
   Stream<String> _streamChat(List<Map<String, String>> messages) async* {
+    // 论文各节正文生成走 writing 角色通道。
+    const role = ModelRole.writing;
     final request = http.Request(
       'POST',
-      Uri.parse('${settings.baseUrl}/chat/completions'),
+      Uri.parse('${settings.roleBaseUrl(role)}/chat/completions'),
     );
-    request.headers['Authorization'] = 'Bearer ${settings.apiKey}';
+    request.headers['Authorization'] = 'Bearer ${settings.roleApiKey(role)}';
     request.headers['Content-Type'] = 'application/json';
     request.body = jsonEncode({
-      'model': settings.model,
+      'model': settings.roleModel(role),
       'messages': messages,
       'stream': true,
     });

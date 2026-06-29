@@ -1,10 +1,9 @@
-import 'dart:convert';
-
-import 'package:http/http.dart' as http;
-
+import 'agent/model_client.dart';
 import 'settings_service.dart';
 
 /// 一次性（非流式）的大模型调用。
+/// 已统一到 [ModelClient]：本类仅作为面向 UI（图谱/知识诊断）的薄封装，
+/// 走 [ModelRole.chat] 通道，不再各自维护一份 `/chat/completions` 接入逻辑。
 class AiClient {
   AiClient(this.settings);
 
@@ -14,31 +13,10 @@ class AiClient {
     required String system,
     required String user,
   }) async {
-    final response = await http
-        .post(
-          Uri.parse('${settings.baseUrl}/chat/completions'),
-          headers: {
-            'Authorization': 'Bearer ${settings.apiKey}',
-            'Content-Type': 'application/json',
-          },
-          body: jsonEncode({
-            'model': settings.model,
-            'stream': false,
-            'messages': [
-              {'role': 'system', 'content': system},
-              {'role': 'user', 'content': user},
-            ],
-          }),
-        )
-        .timeout(const Duration(minutes: 3));
-    if (response.statusCode != 200) {
-      throw Exception(
-          'HTTP ${response.statusCode} ${utf8.decode(response.bodyBytes)}');
-    }
-    final json =
-        jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-    final content =
-        (json['choices']?[0]?['message']?['content'] as String? ?? '').trim();
+    final content = await ModelClient(
+      settings,
+      role: ModelRole.chat,
+    ).complete(system: system, user: user);
     if (content.isEmpty) throw Exception('模型未返回内容');
     return content;
   }
