@@ -86,8 +86,11 @@ class EditableCodeView extends StatefulWidget {
   State<EditableCodeView> createState() => _EditableCodeViewState();
 }
 
-class _EditableCodeViewState extends State<EditableCodeView> {
+class _EditableCodeViewState extends State<EditableCodeView>
+    with SingleTickerProviderStateMixin {
   final _controller = CodeLineEditingController();
+  // 仅 markdown 需要「预览/编辑」两个 tab；用显式控制器以便切到预览时刷新渲染。
+  TabController? _tab;
   bool _loaded = false;
   bool _dirty = false;
   bool _saving = false;
@@ -98,12 +101,20 @@ class _EditableCodeViewState extends State<EditableCodeView> {
   void initState() {
     super.initState();
     _controller.addListener(_onChanged);
+    if (widget.markdownPreview) {
+      _tab = TabController(length: 2, vsync: this);
+      // 切换 tab 完成时重建：从编辑器最新文本重新渲染预览。
+      _tab!.addListener(() {
+        if (!_tab!.indexIsChanging && mounted) setState(() {});
+      });
+    }
     _load();
   }
 
   @override
   void dispose() {
     _controller.removeListener(_onChanged);
+    _tab?.dispose();
     _controller.dispose();
     super.dispose();
   }
@@ -185,56 +196,49 @@ class _EditableCodeViewState extends State<EditableCodeView> {
   }
 
   /// Markdown：工具条 + 「预览 / 编辑」tab。
+  /// 预览读取编辑器当前文本；切到预览 tab 时会重建以反映最新编辑。
   Widget _buildWithPreview() {
-    return DefaultTabController(
-      length: 2,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _toolbar(
-            leading: const TabBar(
-              isScrollable: true,
-              tabAlignment: TabAlignment.start,
-              labelColor: Color(0xFF0D9488),
-              unselectedLabelColor: Color(0xFF8A8A92),
-              indicatorColor: Color(0xFF0D9488),
-              labelStyle:
-                  TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
-              tabs: [Tab(height: 34, text: '预览'), Tab(height: 34, text: '编辑')],
-            ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _toolbar(
+          leading: TabBar(
+            controller: _tab,
+            isScrollable: true,
+            tabAlignment: TabAlignment.start,
+            labelColor: const Color(0xFF0D9488),
+            unselectedLabelColor: const Color(0xFF8A8A92),
+            indicatorColor: const Color(0xFF0D9488),
+            labelStyle:
+                const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
+            tabs: const [Tab(height: 34, text: '预览'), Tab(height: 34, text: '编辑')],
           ),
-          const Divider(height: 1),
-          Expanded(
-            child: TabBarView(
-              children: [
-                // 预览实时跟随编辑内容（监听控制器变化重建）。
-                ListenableBuilder(
-                  listenable: _controller,
-                  builder: (context, _) => Markdown(
-                    data: _controller.text,
-                    padding: const EdgeInsets.all(22),
-                    styleSheet: MarkdownStyleSheet(
-                      p: const TextStyle(fontSize: 14, height: 1.7),
-                      h1: const TextStyle(
-                          fontSize: 20, fontWeight: FontWeight.w700),
-                      h2: const TextStyle(
-                          fontSize: 17, fontWeight: FontWeight.w700),
-                      h3: const TextStyle(
-                          fontSize: 15, fontWeight: FontWeight.w600),
-                      code: const TextStyle(
-                          fontSize: 12.5,
-                          fontFamily: 'Consolas',
-                          backgroundColor: Color(0xFFEFF1F4)),
-                      a: const TextStyle(color: Color(0xFF0D9488)),
-                    ),
-                  ),
+        ),
+        const Divider(height: 1),
+        Expanded(
+          child: TabBarView(
+            controller: _tab,
+            children: [
+              Markdown(
+                data: _controller.text,
+                padding: const EdgeInsets.all(22),
+                styleSheet: MarkdownStyleSheet(
+                  p: const TextStyle(fontSize: 14, height: 1.7),
+                  h1: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+                  h2: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+                  h3: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                  code: const TextStyle(
+                      fontSize: 12.5,
+                      fontFamily: 'Consolas',
+                      backgroundColor: Color(0xFFEFF1F4)),
+                  a: const TextStyle(color: Color(0xFF0D9488)),
                 ),
-                _editor(),
-              ],
-            ),
+              ),
+              _editor(),
+            ],
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 
