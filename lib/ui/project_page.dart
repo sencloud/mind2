@@ -382,7 +382,7 @@ class _ProjectPageState extends State<ProjectPage> {
     );
   }
 
-  /// 文件 tab 内容：内嵌文件查看器（md 预览/源码，其他高亮源码）。
+  /// 文件 tab 内容：内嵌文件查看器（可编辑文本/代码、md 预览/编辑、图片/PDF/Office 预览）。
   Widget _buildDocPane(String abs) {
     return Container(
       width: double.infinity,
@@ -443,37 +443,45 @@ class _ProjectPageState extends State<ProjectPage> {
       ),
       child: Row(
         children: [
-          const Icon(Icons.folder_outlined, size: 16, color: Color(0xFF0D9488)),
-          const SizedBox(width: 8),
-          Flexible(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
+          // 左侧信息区（占满剩余宽度，把右侧按钮组挤到最右）。
+          Expanded(
+            child: Row(
               children: [
-                Text(name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        fontSize: 13, fontWeight: FontWeight.w600)),
-                Text(path,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        fontSize: 10.5, color: Color(0xFF9B9B9F))),
+                const Icon(Icons.folder_outlined,
+                    size: 16, color: Color(0xFF0D9488)),
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 13, fontWeight: FontWeight.w600)),
+                      Text(path,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 10.5, color: Color(0xFF9B9B9F))),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                _IndexChip(index: proj.index, onRescan: proj.rescanProject),
+                if (proj.linkFor(path) != null) ...[
+                  const SizedBox(width: 8),
+                  _ResearchChip(
+                    title: proj.linkFor(path)!.researchTitle,
+                    onTap: () => widget.onOpenResearch
+                        ?.call(proj.linkFor(path)!.researchPath),
+                  ),
+                ],
               ],
             ),
           ),
-          const SizedBox(width: 12),
-          _IndexChip(index: proj.index, onRescan: proj.rescanProject),
-          if (proj.linkFor(path) != null) ...[
-            const SizedBox(width: 8),
-            _ResearchChip(
-              title: proj.linkFor(path)!.researchTitle,
-              onTap: () =>
-                  widget.onOpenResearch?.call(proj.linkFor(path)!.researchPath),
-            ),
-          ],
-          const Spacer(),
+          // 右侧操作按钮组：靠右对齐。
           if (proj.running)
             TextButton.icon(
               onPressed: proj.cancel,

@@ -3,10 +3,14 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_highlight/flutter_highlight.dart';
 import 'package:flutter_highlight/themes/github.dart';
-import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:highlight/highlight.dart' show highlight;
 import 'package:highlight/languages/all.dart' show allLanguages;
 import 'package:path/path.dart' as p;
+import 'package:pdfrx/pdfrx.dart';
+
+import 'editable_code_view.dart';
+import 'preview/media_preview.dart';
+import 'preview/office_preview.dart';
 
 bool _registered = false;
 void _ensureRegistered() {
@@ -127,7 +131,7 @@ class CodeView extends StatelessWidget {
 }
 
 /// 弹出一个对话框展示文件内容（其他模块仍可用；项目页改用内嵌 tab）。
-/// 内容渲染统一交给 [FileContentView]：md 走「预览/源码」、其他走高亮源码。
+/// 内容渲染统一交给 [FileContentView]：可编辑文本/代码、md 预览/编辑、图片/PDF/Office 预览。
 Future<void> showCodeViewer(BuildContext context, String absPath) async {
   final name = p.basename(absPath);
   await showDialog<void>(
@@ -170,120 +174,90 @@ Future<void> showCodeViewer(BuildContext context, String absPath) async {
   );
 }
 
-/// 可内嵌的文件内容查看器（不含标题栏 / 关闭按钮，便于放进 tab 或对话框）：
-/// - Markdown（.md/.markdown）：「预览」格式化渲染 + 可切换「源码」tab；
-/// - 其他文本文件：语法高亮源码。
-/// 自行按路径异步读取文件内容，切换路径会自动重载。
-class FileContentView extends StatefulWidget {
+/// 可内嵌的文件内容查看器（不含标题栏 / 关闭按钮，便于放进 tab 或对话框）。
+/// 按扩展名分发到不同呈现方式，背景统一为白色：
+/// - 图片：缩放预览；PDF：内嵌阅读；音视频：内嵌播放；
+/// - Office（.xlsx/.docx/.pptx）：解析后表格 / 文本预览；
+/// - Markdown：「预览 / 编辑」可切换；其他文本/代码：高亮可编辑 + 保存。
+class FileContentView extends StatelessWidget {
   const FileContentView({super.key, required this.absPath});
 
   final String absPath;
 
-  @override
-  State<FileContentView> createState() => _FileContentViewState();
-}
-
-class _FileContentViewState extends State<FileContentView> {
-  String? _content;
-  String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  @override
-  void didUpdateWidget(FileContentView old) {
-    super.didUpdateWidget(old);
-    if (old.absPath != widget.absPath) _load();
-  }
-
-  Future<void> _load() async {
-    setState(() {
-      _content = null;
-      _error = null;
-    });
-    try {
-      final text = await File(widget.absPath).readAsString();
-      if (mounted) setState(() => _content = text);
-    } catch (e) {
-      if (mounted) setState(() => _error = '无法以文本打开该文件（可能为二进制）：$e');
-    }
-  }
-
-  bool get _isMarkdown {
-    final ext = p.extension(widget.absPath).toLowerCase();
-    return ext == '.md' || ext == '.markdown';
-  }
+  static const _imageExt = {
+    '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.ico'
+  };
+  static const _videoExt = {
+    '.mp4', '.mkv', '.mov', '.avi', '.wmv', '.flv', '.webm', '.m4v',
+    '.mpeg', '.mpg', '.3gp', '.ts', '.rmvb', '.rm', '.vob', '.m2ts'
+  };
+  static const _audioExt = {
+    '.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a', '.wma', '.opus', '.aiff'
+  };
+  static const _officeExt = {
+    '.xlsx', '.docx', '.pptx', '.xls', '.doc', '.ppt'
+  };
+  static const _markdownExt = {'.md', '.markdown'};
 
   @override
   Widget build(BuildContext context) {
-    if (_error != null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Text(_error!,
-              style:
-                  const TextStyle(fontSize: 13, color: Color(0xFF9B9B9F))),
+    final ext = p.extension(absPath).toLowerCase();
+
+    if (_imageExt.contains(ext)) {
+      return Container(
+        color: Colors.white,
+        padding: const EdgeInsets.all(24),
+        child: Center(
+          child: InteractiveViewer(
+            maxScale: 5,
+            child: Image.file(
+              File(absPath),
+              fit: BoxFit.contain,
+              errorBuilder: (_, _, _) => const Text('无法预览此图片'),
+            ),
+          ),
         ),
       );
     }
-    if (_content == null) {
-      return const Center(child: CircularProgressIndicator());
-    }
-    if (!_isMarkdown) {
-      return CodeView(source: _content!, filePath: widget.absPath);
-    }
-    // Markdown：预览 / 源码 两个 tab。
-    return DefaultTabController(
-      length: 2,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const TabBar(
-            isScrollable: true,
-            tabAlignment: TabAlignment.start,
-            labelColor: Color(0xFF0D9488),
-            unselectedLabelColor: Color(0xFF8A8A92),
-            indicatorColor: Color(0xFF0D9488),
-            labelStyle: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
-            tabs: [
-              Tab(height: 36, text: '预览'),
-              Tab(height: 36, text: '源码'),
-            ],
-          ),
-          const Divider(height: 1),
-          Expanded(
-            child: TabBarView(
-              children: [
-                Markdown(
-                  data: _content!,
-                  padding: const EdgeInsets.all(22),
-                  styleSheet: MarkdownStyleSheet(
-                    p: const TextStyle(fontSize: 14, height: 1.7),
-                    h1: const TextStyle(
-                        fontSize: 20, fontWeight: FontWeight.w700, height: 1.6),
-                    h2: const TextStyle(
-                        fontSize: 17, fontWeight: FontWeight.w700, height: 1.5),
-                    h3: const TextStyle(
-                        fontSize: 15, fontWeight: FontWeight.w600, height: 1.5),
-                    code: const TextStyle(
-                        fontSize: 12.5,
-                        fontFamily: 'Consolas',
-                        backgroundColor: Color(0xFFEFF1F4)),
-                    blockquote: const TextStyle(
-                        fontSize: 13.5, color: Color(0xFF6B7280)),
-                    tableBorder:
-                        TableBorder.all(color: const Color(0xFFE0E2E6)),
-                    a: const TextStyle(color: Color(0xFF0D9488)),
-                  ),
-                ),
-                CodeView(source: _content!, filePath: widget.absPath),
-              ],
+    if (ext == '.pdf') {
+      return PdfViewer.file(
+        absPath,
+        key: ValueKey('pdf:$absPath'),
+        params: PdfViewerParams(
+          backgroundColor: const Color(0xFFEDEDF0),
+          loadingBannerBuilder: (context, downloaded, total) =>
+              const Center(child: CircularProgressIndicator()),
+          errorBannerBuilder: (context, error, stack, ref) => Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Text('无法预览此 PDF：$error',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                      fontSize: 13, color: Color(0xFF9B9B9F))),
             ),
           ),
-        ],
+        ),
+      );
+    }
+    if (_videoExt.contains(ext)) {
+      return MediaPreview(path: absPath, isVideo: true);
+    }
+    if (_audioExt.contains(ext)) {
+      return MediaPreview(path: absPath, isVideo: false);
+    }
+    if (_officeExt.contains(ext)) {
+      return Container(
+        color: Colors.white,
+        child: OfficePreview(absPath: absPath),
+      );
+    }
+    // Markdown：预览/编辑；其他文本/代码：高亮可编辑。
+    return Container(
+      color: Colors.white,
+      child: EditableCodeView(
+        key: ValueKey('edit:$absPath'),
+        absPath: absPath,
+        markdownPreview: _markdownExt.contains(ext),
       ),
     );
   }
