@@ -16,6 +16,7 @@ import 'services/paper_service.dart';
 import 'services/plan_service.dart';
 import 'services/platform_capabilities.dart';
 import 'services/playwright_service.dart';
+import 'services/pro_book_service.dart';
 import 'services/project_service.dart';
 import 'services/settings_service.dart';
 import 'services/system_proxy.dart';
@@ -69,6 +70,7 @@ Future<void> main() async {
   final experiment = ExperimentService(settings, memory);
   final project = ProjectService(settings, memory, research: topic);
   final document = DocumentService(settings);
+  final proBook = ProBookService(settings);
   final book = BookService(settings);
   final paper = PaperService(settings);
   // 「计划」：每日待办 + AI 分析并执行（复用统一 Agent 内核）。
@@ -82,6 +84,7 @@ Future<void> main() async {
     await project.init();
   }
   await document.init();
+  await proBook.init();
   await book.init();
   await paper.init();
   await plan.init();
@@ -99,6 +102,7 @@ Future<void> main() async {
       experiment: experiment,
       project: project,
       document: document,
+      proBook: proBook,
       book: book,
       paper: paper,
       plan: plan,
@@ -121,6 +125,7 @@ class MindApp extends StatelessWidget {
     required this.experiment,
     required this.project,
     required this.document,
+    required this.proBook,
     required this.book,
     required this.paper,
     required this.plan,
@@ -136,6 +141,7 @@ class MindApp extends StatelessWidget {
   final ExperimentService experiment;
   final ProjectService project;
   final DocumentService document;
+  final ProBookService proBook;
   final BookService book;
   final PaperService paper;
   final PlanService plan;
@@ -163,6 +169,7 @@ class MindApp extends StatelessWidget {
               chat: chat,
               topicService: topic,
               document: document,
+              proBook: proBook,
               book: book,
               paper: paper,
             )
@@ -177,6 +184,7 @@ class MindApp extends StatelessWidget {
               experiment: experiment,
               project: project,
               document: document,
+              proBook: proBook,
               book: book,
               paper: paper,
               plan: plan,

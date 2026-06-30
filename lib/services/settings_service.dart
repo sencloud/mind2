@@ -273,6 +273,30 @@ class SettingsService extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ---------------------------------------------------------------------------
+  // 图像生成（文生图）配置——用于「专业书籍」补充插图
+  // OpenAI 兼容接口：自动拼接 `/images/generations`。未配置时该功能置灰。
+  // ---------------------------------------------------------------------------
+
+  String get imageBaseUrl => (_prefs.getString('imageBaseUrl') ?? '').trim();
+  String get imageApiKey => (_prefs.getString('imageApiKey') ?? '').trim();
+  String get imageModel => (_prefs.getString('imageModel') ?? '').trim();
+
+  /// 三项都填好才算就绪，文生图按钮才可点。
+  bool get imageGenReady =>
+      imageBaseUrl.isNotEmpty && imageApiKey.isNotEmpty && imageModel.isNotEmpty;
+
+  Future<void> setImageConfig({
+    String? apiKey,
+    String? baseUrl,
+    String? model,
+  }) async {
+    if (apiKey != null) await _prefs.setString('imageApiKey', apiKey.trim());
+    if (baseUrl != null) await _prefs.setString('imageBaseUrl', baseUrl.trim());
+    if (model != null) await _prefs.setString('imageModel', model.trim());
+    notifyListeners();
+  }
+
   // Zotero 本地集成（连接桌面端，无需 API Key）。
   bool get zoteroEnabled => _prefs.getBool('zoteroEnabled') ?? true;
   int get zoteroPort => _prefs.getInt('zoteroPort') ?? 23119;

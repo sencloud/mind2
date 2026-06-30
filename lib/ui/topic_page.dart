@@ -4,6 +4,7 @@ import '../models.dart';
 import '../services/library_service.dart';
 import '../services/playwright_service.dart';
 import '../services/topic_service.dart';
+import 'enter_to_send.dart';
 
 class TopicPage extends StatefulWidget {
   const TopicPage({
@@ -84,95 +85,148 @@ class _TopicPageState extends State<TopicPage> {
   }
 
   /// 弹出澄清问题对话框，收集用户答复并返回 Q/A 文本；用户取消返回 null。
-  Future<String?> _askClarifications(TopicClarification c) {
-    final controllers = [
+  /// 每个问题以「多选选项 + 末尾自定义输入框」的形式呈现，降低输入成本，
+  /// 只有最后一个「其他/自己输入」框需要用户自行填写。
+  Future<String?> _askClarifications(TopicClarification c) async {
+    // 每题选中的选项下标集合。
+    final selected = <int, Set<int>>{};
+    // 每题末尾的「其他/自己输入」文本框。
+    final customInputs = [
       for (var i = 0; i < c.questions.length; i++) TextEditingController(),
     ];
-    return showDialog<String>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: const Text('开始研究前，请先确认一下'),
-        content: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 560),
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (c.understanding.isNotEmpty) ...[
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF0FBF9),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: const Color(0xFFB9E8E0)),
-                    ),
-                    child: Text(
-                      '我的理解：${c.understanding}',
-                      style: const TextStyle(
+    try {
+      return await showDialog<String>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setLocal) => AlertDialog(
+            title: const Text('开始研究前，请先确认一下'),
+            content: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 560),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (c.understanding.isNotEmpty) ...[
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFF0FBF9),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: const Color(0xFFB9E8E0)),
+                        ),
+                        child: Text(
+                          '我的理解：${c.understanding}',
+                          style: const TextStyle(
+                            fontSize: 12.5,
+                            height: 1.5,
+                            color: Color(0xFF0F766E),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    const Text(
+                      '为了研究得更准确、更深入，请勾选下面的选项（可多选、可留空）：',
+                      style: TextStyle(
                         fontSize: 12.5,
-                        height: 1.5,
-                        color: Color(0xFF0F766E),
+                        color: Color(0xFF6B6B70),
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 12),
-                ],
-                const Text(
-                  '为了研究得更准确、更深入，请补充以下信息（可酌情留空）：',
-                  style: TextStyle(fontSize: 12.5, color: Color(0xFF6B6B70)),
+                    const SizedBox(height: 12),
+                    for (var i = 0; i < c.questions.length; i++) ...[
+                      Text(
+                        '${i + 1}. ${c.questions[i].prompt}',
+                        style: const TextStyle(
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      // 模型给出的备选项：用复选框让用户勾选，无需手动输入。
+                      for (var j = 0; j < c.questions[i].options.length; j++)
+                        CheckboxListTile(
+                          value: selected[i]?.contains(j) ?? false,
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          visualDensity: VisualDensity.compact,
+                          controlAffinity: ListTileControlAffinity.leading,
+                          title: Text(
+                            c.questions[i].options[j],
+                            style: const TextStyle(
+                              fontSize: 12.5,
+                              height: 1.35,
+                            ),
+                          ),
+                          onChanged: (checked) {
+                            final set = selected.putIfAbsent(i, () => <int>{});
+                            if (checked == true) {
+                              set.add(j);
+                            } else {
+                              set.remove(j);
+                            }
+                            setLocal(() {});
+                          },
+                        ),
+                      const SizedBox(height: 6),
+                      // 最后一项：没有合适选项时，用户在这里自行补充。
+                      TextField(
+                        controller: customInputs[i],
+                        minLines: 1,
+                        maxLines: 3,
+                        style: const TextStyle(fontSize: 12.5, height: 1.4),
+                        decoration: const InputDecoration(
+                          labelText: '其他 / 自己输入',
+                          hintText: '没有合适选项时，在这里补充你的想法',
+                          isDense: true,
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                    ],
+                  ],
                 ),
-                const SizedBox(height: 12),
-                for (var i = 0; i < c.questions.length; i++) ...[
-                  Text(
-                    '${i + 1}. ${c.questions[i]}',
-                    style: const TextStyle(
-                      fontSize: 13.5,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  TextField(
-                    controller: controllers[i],
-                    minLines: 1,
-                    maxLines: 4,
-                    style: const TextStyle(fontSize: 13.5, height: 1.5),
-                    decoration: const InputDecoration(
-                      hintText: '你的答复…',
-                      isDense: true,
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                ],
-              ],
+              ),
             ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final buf = StringBuffer();
+                  for (var i = 0; i < c.questions.length; i++) {
+                    final q = c.questions[i];
+                    // 收集勾选的选项 + 末尾自定义输入，拼成一行答复。
+                    final parts = <String>[
+                      for (final idx in (selected[i] ?? const <int>{}))
+                        if (idx >= 0 && idx < q.options.length) q.options[idx],
+                    ];
+                    final custom = customInputs[i].text.trim();
+                    if (custom.isNotEmpty) parts.add('其他：$custom');
+                    buf
+                      ..writeln('问：${q.prompt}')
+                      ..writeln(
+                        '答：${parts.isEmpty ? '（用户未填写）' : parts.join('、')}',
+                      )
+                      ..writeln();
+                  }
+                  Navigator.pop(ctx, buf.toString());
+                },
+                child: const Text('确认并开始研究'),
+              ),
+            ],
           ),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final buf = StringBuffer();
-              for (var i = 0; i < c.questions.length; i++) {
-                final a = controllers[i].text.trim();
-                buf
-                  ..writeln('问：${c.questions[i]}')
-                  ..writeln('答：${a.isEmpty ? '（用户未填写）' : a}')
-                  ..writeln();
-              }
-              Navigator.pop(ctx, buf.toString());
-            },
-            child: const Text('确认并开始研究'),
-          ),
-        ],
-      ),
-    );
+      );
+    } finally {
+      for (final ctrl in customInputs) {
+        ctrl.dispose();
+      }
+    }
   }
 
   Future<LoginCredential?> _askLoginCredential(LoginRequest request) async {
@@ -475,22 +529,27 @@ class _TopicPageState extends State<TopicPage> {
       ),
       child: Stack(
         children: [
-          TextField(
-            controller: _controller,
+          EnterToSend(
+            // 忙碌时不响应回车发送。
             enabled: !busy,
-            minLines: 3,
-            maxLines: 8,
-            textInputAction: TextInputAction.newline,
-            keyboardType: TextInputType.multiline,
-            style: const TextStyle(fontSize: 14, height: 1.55),
-            decoration: const InputDecoration(
-              hintText:
-                  '例如：\n我想研究高校档案智能体的安全与长期工程，重点关注准确性、知识库增强、skills 方式和可落地方案。',
-              hintStyle: TextStyle(color: Color(0xFFA8A8AC)),
-              border: InputBorder.none,
-              contentPadding: EdgeInsets.fromLTRB(16, 14, 150, 54),
+            onSubmit: _start,
+            child: TextField(
+              controller: _controller,
+              enabled: !busy,
+              minLines: 3,
+              maxLines: 8,
+              textInputAction: TextInputAction.newline,
+              keyboardType: TextInputType.multiline,
+              style: const TextStyle(fontSize: 14, height: 1.55),
+              decoration: const InputDecoration(
+                hintText:
+                    '例如：\n我想研究高校档案智能体的安全与长期工程，重点关注准确性、知识库增强、skills 方式和可落地方案。\n（回车发送，Ctrl/Shift+回车换行）',
+                hintStyle: TextStyle(color: Color(0xFFA8A8AC)),
+                border: InputBorder.none,
+                contentPadding: EdgeInsets.fromLTRB(16, 14, 150, 54),
+              ),
+              onChanged: (_) => setState(() {}),
             ),
-            onChanged: (_) => setState(() {}),
           ),
           Positioned(
             right: 12,

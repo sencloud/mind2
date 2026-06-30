@@ -147,10 +147,19 @@ class TopicClarification {
   TopicClarification({required this.understanding, required this.questions});
 
   final String understanding;
-  final List<String> questions;
+  final List<ClarifyQuestion> questions;
 
   /// 是否需要先与用户确认（存在歧义或可深入的待澄清点）。
   bool get needsInput => questions.isNotEmpty;
+}
+
+/// 单个澄清问题：除了问题文本，还带上一组可选项，降低用户输入成本。
+/// 界面会自动在选项末尾提供「其他/自己输入」框，因此选项里不要再写“其他”。
+class ClarifyQuestion {
+  ClarifyQuestion({required this.prompt, required this.options});
+
+  final String prompt;
+  final List<String> options;
 }
 
 /// 主题研究服务：像研究 agent 一样「拆解问题 → 多源检索（论文/代码/网页）→
@@ -297,10 +306,15 @@ class TopicFetchService extends ChangeNotifier {
 - **对比类主题**：要对比的双方各自具体指什么、在哪个层面对比（架构 / 性能 / 用法 / 设计理念等）。
 - **研究范围与深度**：希望聚焦哪些方面、面向什么目的、要研究到多深。
 
-请提出 1-4 个最关键的澄清问题（中文，具体、好回答）；只有当主题已非常明确、毫无歧义且无需细化时才不提问。
+请提出 1-4 个最关键的澄清问题（中文，具体、好回答），并为每个问题给出 3-6 个具体、有取舍价值的选项，方便用户直接勾选；只有当主题已非常明确、毫无歧义且无需细化时才不提问。
 
 严格输出 JSON（不要 Markdown、不要多余文字）：
-{"understanding":"你目前对该研究主题的理解（一两句）","questions":["需要向用户确认的问题1","问题2"]}
+{"understanding":"你目前对该研究主题的理解（一两句）","questions":[{"prompt":"需要向用户确认的问题","options":["选项A","选项B","选项C"]}]}
+
+要求：
+- 每题给 3-6 个具体选项，用户可多选。
+- 不要把“其他/自己输入”写进 options，界面会自动提供最后的自定义输入框。
+- 选项必须具体、能帮助锁定研究方向与深度，不能写成“都可以”。
 ''';
     final content = await _chat(
       [
@@ -320,10 +334,21 @@ class TopicFetchService extends ChangeNotifier {
     }
     final parsed = jsonDecode(content.substring(start, end + 1)) as Map;
     final understanding = (parsed['understanding'] as String? ?? '').trim();
-    final questions = [
-      for (final q in (parsed['questions'] as List? ?? []))
-        if (q is String && q.trim().isNotEmpty) q.trim(),
-    ];
+    final questions = <ClarifyQuestion>[];
+    for (final q in (parsed['questions'] as List? ?? [])) {
+      // 兼容两种格式：新格式是 {prompt, options}；老格式只是一句问题字符串。
+      if (q is Map) {
+        final p = (q['prompt'] as String? ?? '').trim();
+        if (p.isEmpty) continue;
+        final options = [
+          for (final o in (q['options'] as List? ?? []))
+            if (o != null && o.toString().trim().isNotEmpty) o.toString().trim(),
+        ];
+        questions.add(ClarifyQuestion(prompt: p, options: options));
+      } else if (q is String && q.trim().isNotEmpty) {
+        questions.add(ClarifyQuestion(prompt: q.trim(), options: const []));
+      }
+    }
     return TopicClarification(
       understanding: understanding,
       questions: questions,

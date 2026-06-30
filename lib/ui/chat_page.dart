@@ -7,6 +7,7 @@ import '../models.dart';
 import '../services/chat_service.dart';
 import '../services/library_service.dart';
 import '../services/settings_service.dart';
+import 'enter_to_send.dart';
 
 const _attachMarker = '【附件：';
 
@@ -58,18 +59,26 @@ class _ChatPageState extends State<ChatPage> {
     final buffer = StringBuffer()
       ..writeln('你是「第二大脑」，用户的本地知识库助手。')
       ..writeln(
-        '用户的本地知识库收录了 ${notes.length} 份文件（以中国档案领域标准为主，也可能包含其他领域的政策、报告等），目录如下：',
+        '用户的本地知识库收录了 ${notes.length} 份文件（以中国档案领域标准为主，也可能包含其他领域的政策、报告等），目录（仅标题/编号索引）如下：',
       );
+    // 目录只列标题与编号，不带阅读状态。
+    // 阅读状态（未读/在读/已读）是用户的学习进度标记，与“能否解读”无关，
+    // 之前把它写进目录会误导模型“未读=无内容=不能解读”，这里去掉。
     for (final n in notes) {
       final no = n.standardNo.isEmpty ? '' : '${n.standardNo} ';
-      buffer.writeln('- [${n.category}] $no${n.fullTitle}（${n.status}）');
+      buffer.writeln('- [${n.category}] $no${n.fullTitle}');
     }
     buffer
       ..writeln()
       ..writeln('要求：')
       ..writeln('1. 始终用中文回答，引用标准时给出标准号；')
-      ..writeln('2. 优先基于知识库中的标准回答，知识库没有的内容要明确说明；')
-      ..writeln('3. 用户消息中带有【附件：…】的部分是标准笔记原文，请基于它回答；')
+      ..writeln(
+        '2. 上面的目录只是知识库的索引。无论某条目是否已生成本地笔记，你都应基于'
+        '你对该标准/文件的专业了解进行解读；当知识库暂无该条目的详细笔记时，'
+        '依据通用专业知识作答，并简要说明“以下为基于通用知识的解读，知识库暂未收录其详细笔记”。'
+        '绝不要因为条目的阅读状态（未读/在读/已读）而拒绝解读——阅读状态只是用户的学习进度。',
+      )
+      ..writeln('3. 用户消息中带有【附件：…】的部分是标准笔记原文，请优先基于它回答；')
       ..writeln('4. 回答面向学习和实际工作，结构清晰、重点突出。');
     return buffer.toString();
   }
@@ -200,18 +209,22 @@ class _ChatPageState extends State<ChatPage> {
                 visualDensity: VisualDensity.compact,
               ),
             ),
-          TextField(
-            controller: _controller,
-            minLines: 1,
-            maxLines: 6,
-            decoration: const InputDecoration(
-              hintText: '随心输入，向你的知识库提问…',
-              hintStyle: TextStyle(color: Color(0xFFA8A8AC), fontSize: 14),
-              border: InputBorder.none,
-              isDense: true,
+          EnterToSend(
+            onSubmit: _send,
+            child: TextField(
+              controller: _controller,
+              minLines: 1,
+              maxLines: 6,
+              keyboardType: TextInputType.multiline,
+              textInputAction: TextInputAction.newline,
+              decoration: const InputDecoration(
+                hintText: '随心输入，向你的知识库提问…（回车发送，Ctrl/Shift+回车换行）',
+                hintStyle: TextStyle(color: Color(0xFFA8A8AC), fontSize: 14),
+                border: InputBorder.none,
+                isDense: true,
+              ),
+              style: const TextStyle(fontSize: 14),
             ),
-            style: const TextStyle(fontSize: 14),
-            onSubmitted: (_) => _send(),
           ),
           const SizedBox(height: 6),
           Row(

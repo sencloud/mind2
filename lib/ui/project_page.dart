@@ -2,7 +2,6 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:url_launcher/url_launcher.dart';
 
@@ -11,6 +10,7 @@ import '../services/code_index_service.dart';
 import '../services/project_service.dart';
 import 'agent_events_view.dart';
 import 'code_view.dart';
+import 'enter_to_send.dart';
 
 class ProjectPage extends StatefulWidget {
   const ProjectPage({super.key, required this.project, this.onOpenResearch});
@@ -638,22 +638,9 @@ class _ProjectPageState extends State<ProjectPage> {
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           Expanded(
-            child: Focus(
-              onKeyEvent: (node, event) {
-                if (event is! KeyDownEvent) return KeyEventResult.ignored;
-                if (event.logicalKey != LogicalKeyboardKey.enter &&
-                    event.logicalKey != LogicalKeyboardKey.numpadEnter) {
-                  return KeyEventResult.ignored;
-                }
-                final keys = HardwareKeyboard.instance.logicalKeysPressed;
-                final newline = keys.contains(LogicalKeyboardKey.controlLeft) ||
-                    keys.contains(LogicalKeyboardKey.controlRight) ||
-                    keys.contains(LogicalKeyboardKey.shiftLeft) ||
-                    keys.contains(LogicalKeyboardKey.shiftRight);
-                if (newline) return KeyEventResult.ignored; // 交给输入框换行
-                if (!proj.running) _send();
-                return KeyEventResult.handled;
-              },
+            child: EnterToSend(
+              enabled: !proj.running,
+              onSubmit: _send,
               child: TextField(
                 controller: _input,
                 enabled: !proj.running,

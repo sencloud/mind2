@@ -20,6 +20,28 @@ import 'preview/file_preview.dart';
 
 const statusOptions = ['未读', '在读', '已读'];
 
+/// 左侧树的浏览方式：按分类、按研究主题、按真实文件夹层级。
+enum _TreeMode { category, research, folder }
+
+/// 文件夹模式用的目录节点：保存子目录、本层笔记与文件。
+class _FolderNode {
+  _FolderNode(this.name);
+
+  final String name;
+  final Map<String, _FolderNode> dirs = {};
+  final List<StandardNote> notes = [];
+  final List<LibraryFile> files = [];
+
+  /// 该目录（含所有子目录）下的笔记 + 文件总数，用于显示徽标。
+  int get count {
+    var c = notes.length + files.length;
+    for (final d in dirs.values) {
+      c += d.count;
+    }
+    return c;
+  }
+}
+
 Color statusColor(String status) => switch (status) {
   '在读' => const Color(0xFFF59E0B),
   '已读' => const Color(0xFF22C55E),
@@ -89,7 +111,10 @@ class _LibraryPageState extends State<LibraryPage> {
   final Set<FileKind> _expandedKinds = {};
   final Set<int> _expandedSteps = {}; // 实验面板里展开了输出的工具步骤
   final Map<String, bool> _expandedThinks = {}; // 「思考过程」块的展开状态（按 事件-片段 索引）
-  bool _treeByResearch = false;
+  _TreeMode _treeMode = _TreeMode.category; // 左侧树的浏览方式：分类 / 研究 / 文件夹
+  final Set<String> _expandedFolders = {}; // 文件夹模式下展开的目录（按相对路径 key）
+  String _query = ''; // 顶部搜索框的关键词；非空时左侧改为显示搜索结果
+  final _searchController = TextEditingController();
   final _expScroll = ScrollController();
   final _editController = TextEditingController();
   final _myNoteController = TextEditingController();
@@ -107,6 +132,7 @@ class _LibraryPageState extends State<LibraryPage> {
     _expScroll.dispose();
     _editController.dispose();
     _myNoteController.dispose();
+    _searchController.dispose();
     super.dispose();
   }
 
@@ -123,7 +149,7 @@ class _LibraryPageState extends State<LibraryPage> {
       _expanded
         ..clear()
         ..add(
-          _treeByResearch && note.research.isNotEmpty
+          _treeMode == _TreeMode.research && note.research.isNotEmpty
               ? note.research
               : note.category,
         );
@@ -1109,47 +1135,15 @@ ${_clipContext(note.body, 12000)}
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        _buildSearchBox(),
         _buildTreeModeSwitch(researchGroups.length),
         Expanded(
           child: ListView(
             padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
-            children: [
-              if (_treeByResearch)
-                if (researchGroups.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.fromLTRB(12, 16, 12, 8),
-                    child: Text(
-                      '暂无主题研究产物',
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        color: Color(0xFF9B9B9F),
-                      ),
-                    ),
-                  )
-                else
-                  for (final e in researchGroups.entries) ...[
-                    _buildTreeResearch(e.key, e.value.length),
-                    if (_expanded.contains(e.key))
-                      for (final n in _sortResearchNotes(e.value))
-                        _buildTreeNote(n, left: 33),
-                  ]
-              else
-                for (final c in lib.categories) ...[
-                  _buildTreeCategory(
-                    c,
-                    lib.notes.where((n) => n.category == c).length,
-                  ),
-                  if (_expanded.contains(c))
-                    for (final n in lib.notes.where((n) => n.category == c))
-                      _buildTreeNote(n),
-                ],
-              _buildFileSectionHeader(),
-              for (final k in fileLib.nonEmptyKinds) ...[
-                _buildTreeKind(k, fileLib.filesOf(k).length),
-                if (_expandedKinds.contains(k))
-                  for (final f in fileLib.filesOf(k)) _buildTreeFile(f),
-              ],
-            ],
+            // 顶部搜索框非空时，跨笔记/文件按名称过滤，忽略当前浏览模式。
+            children: _query.trim().isNotEmpty
+                ? _buildSearchResults(lib, fileLib)
+                : _buildTreeBody(lib, fileLib, researchGroups),
           ),
         ),
         Divider(height: 1, color: Theme.of(context).dividerColor),
@@ -1223,6 +1217,276 @@ ${_clipContext(note.body, 12000)}
     );
   }
 
+  /// 顶部搜索框：跨「笔记 + 文件」按名称/标题/编号过滤。
+  Widget _buildSearchBox() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 10, 10, 0),
+      child: TextField(
+        controller: _searchController,
+        style: const TextStyle(fontSize: 13),
+        decoration: InputDecoration(
+          hintText: '搜索笔记 / 文件…',
+          hintStyle: const TextStyle(fontSize: 13, color: Color(0xFFA8A8AC)),
+          prefixIcon: const Icon(Icons.search, size: 18),
+          prefixIconConstraints: const BoxConstraints(minWidth: 34),
+          suffixIcon: _query.isEmpty
+              ? null
+              : IconButton(
+                  icon: const Icon(Icons.close, size: 16),
+                  onPressed: () {
+                    _searchController.clear();
+                    setState(() => _query = '');
+                  },
+                ),
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(vertical: 9),
+          filled: true,
+          fillColor: const Color(0xFFF5F5F6),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: BorderSide.none,
+          ),
+        ),
+        onChanged: (v) => setState(() => _query = v),
+      ),
+    );
+  }
+
+  /// 搜索结果：扁平列出匹配的笔记与文件（忽略当前浏览模式）。
+  List<Widget> _buildSearchResults(
+    LibraryService lib,
+    FileLibraryService fileLib,
+  ) {
+    final q = _query.trim().toLowerCase();
+    final notes =
+        lib.notes
+            .where(
+              (n) =>
+                  n.fullTitle.toLowerCase().contains(q) ||
+                  n.standardNo.toLowerCase().contains(q) ||
+                  n.category.toLowerCase().contains(q),
+            )
+            .toList()
+          ..sort((a, b) => a.fullTitle.compareTo(b.fullTitle));
+    final files =
+        fileLib.files.where((f) => f.name.toLowerCase().contains(q)).toList()
+          ..sort((a, b) => a.name.compareTo(b.name));
+    if (notes.isEmpty && files.isEmpty) {
+      return const [
+        Padding(
+          padding: EdgeInsets.fromLTRB(12, 16, 12, 8),
+          child: Text(
+            '没有匹配的笔记或文件',
+            style: TextStyle(fontSize: 12.5, color: Color(0xFF9B9B9F)),
+          ),
+        ),
+      ];
+    }
+    return [
+      if (notes.isNotEmpty) _buildSectionLabel('笔记 · ${notes.length}'),
+      for (final n in notes) _buildTreeNote(n, left: 14),
+      if (files.isNotEmpty) _buildSectionLabel('文件 · ${files.length}'),
+      for (final f in files) _buildTreeFile(f, left: 14),
+    ];
+  }
+
+  /// 小节标题（灰色小字）。
+  Widget _buildSectionLabel(String text) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 14, 8, 4),
+      child: Text(
+        text,
+        style: const TextStyle(
+          fontSize: 11.5,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0.5,
+          color: Color(0xFF9B9B9F),
+        ),
+      ),
+    );
+  }
+
+  /// 按当前浏览模式构建左侧树的内容。
+  List<Widget> _buildTreeBody(
+    LibraryService lib,
+    FileLibraryService fileLib,
+    Map<String, List<StandardNote>> researchGroups,
+  ) {
+    // 文件库（按类型）区块：分类 / 研究 模式末尾追加，文件夹模式已含在树里。
+    List<Widget> fileSection() => [
+      _buildFileSectionHeader(),
+      for (final k in fileLib.nonEmptyKinds) ...[
+        _buildTreeKind(k, fileLib.filesOf(k).length),
+        if (_expandedKinds.contains(k))
+          for (final f in fileLib.filesOf(k)) _buildTreeFile(f),
+      ],
+    ];
+
+    switch (_treeMode) {
+      case _TreeMode.folder:
+        return _buildFolderTree(lib, fileLib);
+      case _TreeMode.research:
+        return [
+          if (researchGroups.isEmpty)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(12, 16, 12, 8),
+              child: Text(
+                '暂无主题研究产物',
+                style: TextStyle(fontSize: 12.5, color: Color(0xFF9B9B9F)),
+              ),
+            )
+          else
+            for (final e in researchGroups.entries) ...[
+              _buildTreeResearch(e.key, e.value.length),
+              if (_expanded.contains(e.key))
+                for (final n in _sortResearchNotes(e.value))
+                  _buildTreeNote(n, left: 33),
+            ],
+          ...fileSection(),
+        ];
+      case _TreeMode.category:
+        return [
+          for (final c in lib.categories) ...[
+            _buildTreeCategory(
+              c,
+              lib.notes.where((n) => n.category == c).length,
+            ),
+            if (_expanded.contains(c))
+              for (final n in lib.notes.where((n) => n.category == c))
+                _buildTreeNote(n),
+          ],
+          ...fileSection(),
+        ];
+    }
+  }
+
+  /// 文件夹模式：按知识库里**真实的目录层级**构建一棵树（笔记 + 文件），
+  /// 这样「政策法规 → 国标 / 地标」这类分层分级就能原样展示，方便查找浏览。
+  List<Widget> _buildFolderTree(LibraryService lib, FileLibraryService fileLib) {
+    final vault = lib.settings.vaultPath;
+    final root = _FolderNode('');
+
+    void add(String absPath, {StandardNote? note, LibraryFile? file}) {
+      final rel = p.relative(absPath, from: vault);
+      final segs = rel
+          .split(RegExp(r'[\\/]'))
+          .where((s) => s.isNotEmpty)
+          .toList();
+      var cur = root;
+      // 除最后一段（文件名）外，逐级建立 / 复用目录节点。
+      for (var i = 0; i < segs.length - 1; i++) {
+        cur = cur.dirs.putIfAbsent(segs[i], () => _FolderNode(segs[i]));
+      }
+      if (note != null) cur.notes.add(note);
+      if (file != null) cur.files.add(file);
+    }
+
+    for (final n in lib.notes) {
+      add(n.filePath, note: n);
+    }
+    for (final f in fileLib.files) {
+      add(f.path, file: f);
+    }
+
+    if (root.dirs.isEmpty && root.notes.isEmpty && root.files.isEmpty) {
+      return const [
+        Padding(
+          padding: EdgeInsets.fromLTRB(12, 16, 12, 8),
+          child: Text(
+            '知识库为空',
+            style: TextStyle(fontSize: 12.5, color: Color(0xFF9B9B9F)),
+          ),
+        ),
+      ];
+    }
+    return _folderRows(root, '', 0);
+  }
+
+  /// 递归把文件夹节点展开成有序的行（目录在前、笔记其次、文件最后）。
+  List<Widget> _folderRows(_FolderNode node, String path, int depth) {
+    final rows = <Widget>[];
+    final names = node.dirs.keys.toList()..sort();
+    for (final name in names) {
+      final child = node.dirs[name]!;
+      final childPath = '$path/$name';
+      final expanded = _expandedFolders.contains(childPath);
+      rows.add(_buildTreeFolder(name, childPath, expanded, depth, child.count));
+      if (expanded) rows.addAll(_folderRows(child, childPath, depth + 1));
+    }
+    final notes = [...node.notes]
+      ..sort((a, b) => a.fullTitle.compareTo(b.fullTitle));
+    for (final n in notes) {
+      rows.add(_buildTreeNote(n, left: _indent(depth + 1)));
+    }
+    final files = [...node.files]..sort((a, b) => a.name.compareTo(b.name));
+    for (final f in files) {
+      rows.add(_buildTreeFile(f, left: _indent(depth + 1)));
+    }
+    return rows;
+  }
+
+  /// 按层级深度计算左缩进。
+  double _indent(int depth) => 12 + depth * 16;
+
+  Widget _buildTreeFolder(
+    String name,
+    String pathKey,
+    bool expanded,
+    int depth,
+    int count,
+  ) {
+    return Material(
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: () => setState(() {
+          expanded
+              ? _expandedFolders.remove(pathKey)
+              : _expandedFolders.add(pathKey);
+        }),
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(_indent(depth), 7, 8, 7),
+          child: Row(
+            children: [
+              AnimatedRotation(
+                turns: expanded ? 0.25 : 0,
+                duration: const Duration(milliseconds: 150),
+                child: const Icon(
+                  Icons.chevron_right,
+                  size: 17,
+                  color: Color(0xFF6B6B70),
+                ),
+              ),
+              const SizedBox(width: 2),
+              Icon(
+                expanded ? Icons.folder_open : Icons.folder_outlined,
+                size: 15,
+                color: const Color(0xFF6B6B70),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              Text(
+                '$count',
+                style: const TextStyle(fontSize: 12, color: Color(0xFF9B9B9F)),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Map<String, List<StandardNote>> _researchGroups(List<StandardNote> notes) {
     final groups = <String, List<StandardNote>>{};
     for (final n in notes) {
@@ -1257,17 +1521,18 @@ ${_clipContext(note.body, 12000)}
   }
 
   Widget _buildTreeModeSwitch(int researchCount) {
-    Widget item(bool byResearch, String label, IconData icon) {
-      final selected = _treeByResearch == byResearch;
+    Widget item(_TreeMode mode, String label, IconData icon) {
+      final selected = _treeMode == mode;
       return Expanded(
         child: InkWell(
           borderRadius: BorderRadius.circular(8),
           onTap: () => setState(() {
-            _treeByResearch = byResearch;
+            _treeMode = mode;
             _expanded.clear();
+            // 切到分类/研究时，把当前选中项所属分组展开；文件夹模式不动。
             final note = _selected;
-            if (note != null) {
-              final key = _treeByResearch && note.research.isNotEmpty
+            if (note != null && mode != _TreeMode.folder) {
+              final key = mode == _TreeMode.research && note.research.isNotEmpty
                   ? note.research
                   : note.category;
               _expanded.add(key);
@@ -1288,11 +1553,11 @@ ${_clipContext(note.body, 12000)}
                   size: 14,
                   color: selected ? Colors.white : const Color(0xFF6B6B70),
                 ),
-                const SizedBox(width: 5),
+                const SizedBox(width: 4),
                 Text(
                   label,
                   style: TextStyle(
-                    fontSize: 12.5,
+                    fontSize: 12,
                     fontWeight: FontWeight.w600,
                     color: selected ? Colors.white : const Color(0xFF6B6B70),
                   ),
@@ -1317,12 +1582,13 @@ ${_clipContext(note.body, 12000)}
             ),
             child: Row(
               children: [
-                item(false, '分类', Icons.folder_outlined),
-                item(true, '研究', Icons.travel_explore_outlined),
+                item(_TreeMode.category, '分类', Icons.folder_outlined),
+                item(_TreeMode.research, '研究', Icons.travel_explore_outlined),
+                item(_TreeMode.folder, '文件夹', Icons.account_tree_outlined),
               ],
             ),
           ),
-          if (_treeByResearch)
+          if (_treeMode == _TreeMode.research)
             Padding(
               padding: const EdgeInsets.only(top: 6),
               child: Text(
@@ -1402,7 +1668,7 @@ ${_clipContext(note.body, 12000)}
     );
   }
 
-  Widget _buildTreeFile(LibraryFile file) {
+  Widget _buildTreeFile(LibraryFile file, {double left = 33}) {
     final selected = file.path == _selectedFile?.path;
     return Material(
       color: selected ? const Color(0xFFF1F1F3) : Colors.transparent,
@@ -1414,7 +1680,7 @@ ${_clipContext(note.body, 12000)}
           message: file.name,
           waitDuration: const Duration(milliseconds: 600),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(33, 6.5, 8, 6.5),
+            padding: EdgeInsets.fromLTRB(left, 6.5, 8, 6.5),
             child: Text(
               file.name,
               maxLines: 1,

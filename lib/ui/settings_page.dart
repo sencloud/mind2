@@ -54,6 +54,17 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
   };
 
+  // 「图像模型（文生图）」配置——用于专业书籍补充插图。
+  late final _imgKeyCtrl = TextEditingController(
+    text: widget.settings.imageApiKey,
+  );
+  late final _imgBaseCtrl = TextEditingController(
+    text: widget.settings.imageBaseUrl,
+  );
+  late final _imgModelCtrl = TextEditingController(
+    text: widget.settings.imageModel,
+  );
+
   bool _testing = false;
   bool? _testOk;
 
@@ -65,6 +76,9 @@ class _SettingsPageState extends State<SettingsPage> {
   void dispose() {
     _vaultController.dispose();
     _portController.dispose();
+    _imgKeyCtrl.dispose();
+    _imgBaseCtrl.dispose();
+    _imgModelCtrl.dispose();
     for (final c in _providerCtrls.values) {
       c.apiKey.dispose();
       c.baseUrl.dispose();
@@ -91,6 +105,11 @@ class _SettingsPageState extends State<SettingsPage> {
       );
     }
     await widget.settings.setExperimentProvider(_expProvider);
+    await widget.settings.setImageConfig(
+      apiKey: _imgKeyCtrl.text,
+      baseUrl: _imgBaseCtrl.text,
+      model: _imgModelCtrl.text,
+    );
     await widget.library.reload();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -252,6 +271,8 @@ class _SettingsPageState extends State<SettingsPage> {
               const SizedBox(height: 8),
               _buildRoleModelCard(),
               const SizedBox(height: 8),
+              _buildImageModelCard(),
+              const SizedBox(height: 8),
               _buildZoteroCard(),
               const SizedBox(height: 8),
               _buildPlaywrightCard(),
@@ -382,6 +403,51 @@ class _SettingsPageState extends State<SettingsPage> {
               if (mounted) setState(() {});
             },
           ),
+        ],
+      ),
+    );
+  }
+
+  /// 「图像模型（文生图）」：用于专业书籍里 AI 生成插图。
+  /// 走 OpenAI 兼容的 /images/generations 接口，需填基址、Key、模型名。
+  /// 三项填全后「专业书籍 → 补充图表 → AI 文生图」才可用，否则置灰。
+  Widget _buildImageModelCard() {
+    final ready = widget.settings.imageGenReady;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 14, 18, 16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFAFAFB),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFECECEE)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Text(
+                '图像模型（文生图）',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(width: 8),
+              if (ready)
+                _tag('已配置', const Color(0xFF0D9488))
+              else
+                _tag('未配置', const Color(0xFFB08400)),
+            ],
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            '用于「专业书籍 → 补充图表 → AI 文生图」。填写 OpenAI 兼容的图像生成接口'
+            '（如智谱 CogView、通义万相等），自动拼接 /images/generations。未配置时该选项不可用。',
+            style: TextStyle(fontSize: 12, color: Color(0xFF8B8B90)),
+          ),
+          const SizedBox(height: 12),
+          _miniField('API Key', _imgKeyCtrl, obscure: true),
+          const SizedBox(height: 8),
+          _miniField('接口基址 Base URL', _imgBaseCtrl),
+          const SizedBox(height: 8),
+          _miniField('模型名 Model', _imgModelCtrl),
         ],
       ),
     );

@@ -11,6 +11,7 @@ import '../services/library_service.dart';
 import '../services/paper_service.dart';
 import '../services/plan_service.dart';
 import '../services/playwright_service.dart';
+import '../services/pro_book_service.dart';
 import '../services/project_service.dart';
 import '../services/settings_service.dart';
 import '../services/topic_service.dart';
@@ -37,6 +38,7 @@ class AppShell extends StatefulWidget {
     required this.experiment,
     required this.project,
     required this.document,
+    required this.proBook,
     required this.book,
     required this.paper,
     required this.plan,
@@ -52,6 +54,7 @@ class AppShell extends StatefulWidget {
   final ExperimentService experiment;
   final ProjectService project;
   final DocumentService document;
+  final ProBookService proBook;
   final BookService book;
   final PaperService paper;
   final PlanService plan;
@@ -64,7 +67,7 @@ class _AppShellState extends State<AppShell> {
   int _index = 0;
   StandardNote? _noteToOpen;
   int _libToken = 0;
-  int _writingTab = 0; // 0=文档 1=小说 2=论文
+  int _writingTab = 0; // 0=文档 1=专业书籍 2=小说 3=论文
   int _writingToken = 0;
   bool _sidebarCollapsed = false;
 
@@ -116,7 +119,7 @@ class _AppShellState extends State<AppShell> {
           final draft = widget.paper.createFromResearch(note, format);
           setState(() {
             _index = 6;
-            _writingTab = 2;
+            _writingTab = 3; // 论文 tab（文档/专业书籍/小说/论文）
             _writingToken++;
           });
           Future.microtask(() => widget.paper.writeBilingualDraft(draft));
@@ -157,6 +160,7 @@ class _AppShellState extends State<AppShell> {
       WritingPage(
         key: ValueKey('writing$_writingToken'),
         document: widget.document,
+        proBook: widget.proBook,
         book: widget.book,
         paper: widget.paper,
         initialTab: _writingTab,

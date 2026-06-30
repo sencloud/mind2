@@ -7,6 +7,7 @@ import '../services/document_service.dart';
 import '../services/file_library_service.dart';
 import '../services/library_service.dart';
 import '../services/paper_service.dart';
+import '../services/pro_book_service.dart';
 import '../services/settings_service.dart';
 import '../services/topic_service.dart';
 import 'chat_page.dart';
@@ -25,6 +26,7 @@ class MobileAppShell extends StatefulWidget {
     required this.chat,
     required this.topicService,
     required this.document,
+    required this.proBook,
     required this.book,
     required this.paper,
   });
@@ -35,6 +37,7 @@ class MobileAppShell extends StatefulWidget {
   final ChatService chat;
   final TopicFetchService topicService;
   final DocumentService document;
+  final ProBookService proBook;
   final BookService book;
   final PaperService paper;
 
@@ -101,6 +104,7 @@ class _MobileAppShellState extends State<MobileAppShell> {
       ),
       WritingPage(
         document: widget.document,
+        proBook: widget.proBook,
         book: widget.book,
         paper: widget.paper,
       ),

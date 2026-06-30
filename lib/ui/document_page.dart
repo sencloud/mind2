@@ -95,7 +95,7 @@ class _DocumentPageState extends State<DocumentPage> {
           ),
           const SizedBox(height: 6),
           const Text(
-            '给定主题并选择文档模板，自动生成公文、需求文档、申报书、制度、总结等正式文稿；也可以上传 docx 模板，按模板结构生成。',
+            '给定主题并选择文档模板，自动生成公文、需求文档、申报书、制度、总结等正式文稿；也可以上传 docx / Excel 模板（Excel 支持多个工作表），按模板结构生成。',
             style: TextStyle(fontSize: 13, color: _sub),
           ),
           const SizedBox(height: 24),
@@ -182,8 +182,14 @@ class _DocumentPageState extends State<DocumentPage> {
               ),
               Row(
                 children: [
-                  _chip(draft.templateName.isEmpty ? '文档' : draft.templateName),
+                  // 模板名可能是很长的文件名，用 Flexible 让它收缩并省略。
+                  Flexible(
+                    child: _chip(
+                      draft.templateName.isEmpty ? '文档' : draft.templateName,
+                    ),
+                  ),
                   const Spacer(),
+                  const SizedBox(width: 8),
                   Text(
                     '${draft.words} 字',
                     style: const TextStyle(fontSize: 11.5, color: _muted),
@@ -209,7 +215,7 @@ class _DocumentPageState extends State<DocumentPage> {
             children: [
               SizedBox(width: 390, child: _leftPanel(svc, draft, template)),
               const VerticalDivider(width: 1),
-              Expanded(child: _editing ? _editor(draft) : _preview()),
+              Expanded(child: _editing ? _editor(draft) : _preview(draft)),
             ],
           ),
         ),
@@ -253,9 +259,9 @@ class _DocumentPageState extends State<DocumentPage> {
             const SizedBox(width: 12),
           ],
           OutlinedButton.icon(
-            onPressed: svc.busy ? null : () => _pickDocxTemplate(svc),
+            onPressed: svc.busy ? null : () => _pickTemplate(svc),
             icon: const Icon(Icons.upload_file, size: 16),
-            label: const Text('上传 docx 模板'),
+            label: const Text('上传模板 (docx/xlsx)'),
           ),
           const SizedBox(width: 8),
           OutlinedButton.icon(
@@ -472,7 +478,11 @@ class _DocumentPageState extends State<DocumentPage> {
     );
   }
 
-  Widget _preview() {
+  Widget _preview(DocumentDraft draft) {
+    // Excel 模式：按工作表分 sheet 预览（tab 形式）。
+    final sheets = draft.spreadsheet
+        ? DocumentService.parseSheets(_content.text)
+        : const <({String name, List<List<String>> rows})>[];
     return Container(
       color: const Color(0xFFFAFAFB),
       child: Column(
@@ -489,16 +499,53 @@ class _DocumentPageState extends State<DocumentPage> {
             ),
           ),
           Expanded(
-            child: Markdown(
-              data: _content.text.trim().isEmpty ? '（暂无正文）' : _content.text,
-              padding: const EdgeInsets.all(22),
-              styleSheet: _officialMarkdownStyle(),
+            child: sheets.isNotEmpty
+                ? _sheetTabs(sheets)
+                : Markdown(
+                    data: _content.text.trim().isEmpty
+                        ? '（暂无正文）'
+                        : _content.text,
+                    padding: const EdgeInsets.all(22),
+                    styleSheet: _officialMarkdownStyle(),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 多工作表预览：每个工作表一个 tab，内部用表格展示该 sheet 的行/列。
+  Widget _sheetTabs(List<({String name, List<List<String>> rows})> sheets) {
+    return DefaultTabController(
+      length: sheets.length,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Material(
+            color: Colors.white,
+            child: TabBar(
+              isScrollable: true,
+              tabAlignment: TabAlignment.start,
+              labelColor: _accent,
+              unselectedLabelColor: _sub,
+              indicatorColor: _accent,
+              labelStyle: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+              tabs: [for (final s in sheets) Tab(text: s.name)],
+            ),
+          ),
+          Expanded(
+            child: TabBarView(
+              children: [for (final s in sheets) _SheetTableView(s.rows)],
             ),
           ),
         ],
       ),
     );
   }
+
 
   MarkdownStyleSheet _officialMarkdownStyle() {
     const body = TextStyle(
@@ -714,16 +761,16 @@ class _DocumentPageState extends State<DocumentPage> {
     if (ok == true) await svc.delete(draft);
   }
 
-  Future<void> _pickDocxTemplate(DocumentService svc) async {
+  Future<void> _pickTemplate(DocumentService svc) async {
     final result = await FilePicker.pickFiles(
       type: FileType.custom,
-      allowedExtensions: ['docx'],
+      allowedExtensions: ['docx', 'xlsx'],
     );
     final path = result?.files.single.path;
     if (path == null) return;
     try {
-      await svc.importDocxTemplate(path);
-      _toast('docx 模板已导入');
+      await svc.importTemplate(path);
+      _toast('模板已导入');
     } catch (e) {
       _toast('导入失败：$e');
     }
@@ -763,8 +810,11 @@ class _DocumentPageState extends State<DocumentPage> {
   Future<void> _export(DocumentService svc) async {
     final draft = svc.current;
     if (draft == null) return;
-    var exportWord = true;
-    var exportPdf = true;
+    // 多工作表 Excel 文档默认只导出 xlsx；普通文稿默认导出 Word + PDF。
+    final sheet = draft.spreadsheet;
+    var exportWord = !sheet;
+    var exportPdf = !sheet;
+    var exportExcel = sheet;
     var htmlPipeline = true;
     final ok = await showDialog<bool>(
       context: context,
@@ -777,18 +827,25 @@ class _DocumentPageState extends State<DocumentPage> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 CheckboxListTile(
+                  value: exportExcel,
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('导出 Excel'),
+                  subtitle: const Text('按「工作表」分节生成多 sheet 的 .xlsx 文件'),
+                  onChanged: (v) => setLocal(() => exportExcel = v ?? false),
+                ),
+                CheckboxListTile(
                   value: exportWord,
                   contentPadding: EdgeInsets.zero,
                   title: const Text('导出 Word'),
                   subtitle: const Text('导出为标准 .docx 文件'),
-                  onChanged: (v) => setLocal(() => exportWord = v ?? true),
+                  onChanged: (v) => setLocal(() => exportWord = v ?? false),
                 ),
                 CheckboxListTile(
                   value: exportPdf,
                   contentPadding: EdgeInsets.zero,
                   title: const Text('导出 PDF'),
                   subtitle: const Text('使用本机 Edge / Chrome 打印为 PDF'),
-                  onChanged: (v) => setLocal(() => exportPdf = v ?? true),
+                  onChanged: (v) => setLocal(() => exportPdf = v ?? false),
                 ),
                 const Divider(height: 24),
                 CheckboxListTile(
@@ -807,7 +864,7 @@ class _DocumentPageState extends State<DocumentPage> {
               child: const Text('取消'),
             ),
             FilledButton(
-              onPressed: exportWord || exportPdf
+              onPressed: exportWord || exportPdf || exportExcel
                   ? () => Navigator.pop(ctx, true)
                   : null,
               child: const Text('导出'),
@@ -826,6 +883,7 @@ class _DocumentPageState extends State<DocumentPage> {
         formats: {
           if (exportWord) DocumentExportFormat.word,
           if (exportPdf) DocumentExportFormat.pdf,
+          if (exportExcel) DocumentExportFormat.excel,
         },
         htmlPipeline: htmlPipeline,
       );
@@ -876,4 +934,82 @@ class _DocumentPageState extends State<DocumentPage> {
       ),
     ),
   );
+}
+
+/// 单个工作表的表格预览：首行作表头，带常驻的横向/纵向滚动条，内容看得全。
+/// 用独立 StatefulWidget 持有各自的 ScrollController，避免 tab 间共享冲突。
+class _SheetTableView extends StatefulWidget {
+  const _SheetTableView(this.rows);
+
+  final List<List<String>> rows;
+
+  @override
+  State<_SheetTableView> createState() => _SheetTableViewState();
+}
+
+class _SheetTableViewState extends State<_SheetTableView> {
+  final _vertical = ScrollController();
+  final _horizontal = ScrollController();
+
+  @override
+  void dispose() {
+    _vertical.dispose();
+    _horizontal.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = widget.rows;
+    if (rows.isEmpty) {
+      return const Center(
+        child: Text('（本工作表暂无内容）', style: TextStyle(fontSize: 13, color: _muted)),
+      );
+    }
+    final cols = rows.map((r) => r.length).reduce((a, b) => a > b ? a : b);
+    String at(List<String> row, int c) => c < row.length ? row[c] : '';
+    return Scrollbar(
+      controller: _vertical,
+      thumbVisibility: true,
+      child: SingleChildScrollView(
+        controller: _vertical,
+        scrollDirection: Axis.vertical,
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+        child: Scrollbar(
+          controller: _horizontal,
+          thumbVisibility: true,
+          child: SingleChildScrollView(
+            controller: _horizontal,
+            scrollDirection: Axis.horizontal,
+            child: DataTable(
+              headingRowColor: WidgetStateProperty.all(const Color(0xFFF3F4F6)),
+              headingTextStyle: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: Colors.black,
+              ),
+              dataTextStyle: const TextStyle(
+                fontSize: 12.5,
+                color: Colors.black,
+              ),
+              border: TableBorder.all(color: const Color(0xFFD8D8DC)),
+              columns: [
+                for (var c = 0; c < cols; c++)
+                  DataColumn(label: Text(at(rows.first, c))),
+              ],
+              rows: [
+                for (var r = 1; r < rows.length; r++)
+                  DataRow(
+                    cells: [
+                      for (var c = 0; c < cols; c++)
+                        DataCell(Text(at(rows[r], c))),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }

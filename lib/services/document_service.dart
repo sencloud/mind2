@@ -49,7 +49,7 @@ class ReferenceDocument {
       );
 }
 
-enum DocumentExportFormat { word, pdf }
+enum DocumentExportFormat { word, pdf, excel }
 
 class DocumentDraft {
   DocumentDraft({
@@ -60,6 +60,7 @@ class DocumentDraft {
     this.expectedPages = 3,
     this.templateName = '',
     this.templateText = '',
+    this.spreadsheet = false,
     List<ReferenceDocument>? references,
     this.content = '',
     required this.createdAt,
@@ -73,6 +74,10 @@ class DocumentDraft {
   int expectedPages;
   String templateName;
   String templateText;
+
+  /// 是否为「多工作表 Excel」文档：上传 xlsx 模板时置为 true。
+  /// 为 true 时按工作表组织生成内容，并可导出 .xlsx。
+  bool spreadsheet;
   List<ReferenceDocument> references;
   String content;
   final DateTime createdAt;
@@ -88,6 +93,7 @@ class DocumentDraft {
     'expectedPages': expectedPages,
     'templateName': templateName,
     'templateText': templateText,
+    'spreadsheet': spreadsheet,
     'references': references.map((r) => r.toJson()).toList(),
     'content': content,
     'createdAt': createdAt.toIso8601String(),
@@ -104,6 +110,7 @@ class DocumentDraft {
     expectedPages: (json['expectedPages'] as num?)?.toInt() ?? 3,
     templateName: json['templateName'] as String? ?? '',
     templateText: json['templateText'] as String? ?? '',
+    spreadsheet: json['spreadsheet'] as bool? ?? false,
     references: ((json['references'] as List?) ?? [])
         .whereType<Map>()
         .map((e) => ReferenceDocument.fromJson(e.cast<String, dynamic>()))
@@ -297,15 +304,27 @@ class DocumentService extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> importDocxTemplate(String path) async {
+  /// 导入模板文件。支持 docx 与 xlsx（Excel 可含多个工作表）。
+  /// 解析出的文本存入 templateText，生成文档时作为结构/栏目参考。
+  Future<void> importTemplate(String path) async {
     final draft = current;
     if (draft == null) throw StateError('未打开文档');
     final file = File(path);
     if (!await file.exists()) throw Exception('模板文件不存在：$path');
-    final text = await _readDocxText(file);
-    if (text.trim().isEmpty) throw Exception('未从 docx 模板中解析到正文内容');
+    final ext = p.extension(path).toLowerCase();
+    final String text;
+    if (ext == '.docx') {
+      text = await _readDocxText(file);
+    } else if (ext == '.xlsx') {
+      text = await _readXlsxTemplate(file);
+    } else {
+      throw Exception('模板仅支持 docx 与 xlsx 格式');
+    }
+    if (text.trim().isEmpty) throw Exception('未从模板中解析到内容');
     draft.templateName = p.basename(path);
     draft.templateText = text;
+    // 上传 Excel 模板即进入「多工作表」模式：按 sheet 生成、可导出 xlsx。
+    draft.spreadsheet = ext == '.xlsx';
     draft.updatedAt = DateTime.now();
     notifyListeners();
     await _persist();
@@ -428,47 +447,26 @@ class DocumentService extends ChangeNotifier {
       await _printHtmlToPdf(htmlFile, pdf);
       exported.add(pdf);
     }
+    if (formats.contains(DocumentExportFormat.excel)) {
+      final xlsx = File(p.join(dir.path, '$base.xlsx'));
+      await _writeXlsx(draft, xlsx);
+      exported.add(xlsx);
+    }
   }
 
   Future<void> generate() async {
     final draft = current;
     if (draft == null || busy) return;
-    final template = templateOf(draft.templateId);
     busy = true;
     stage = '正在生成文档…';
     notifyListeners();
     try {
-      final reply = await _chat([
-        {
-          'role': 'system',
-          'content':
-              '你是严谨的中文文档写作专家，熟悉党政机关公文、产品需求、项目申报、制度文件和研究报告写作。只输出文档正文，不解释。',
-        },
-        {
-          'role': 'user',
-          'content':
-              '''
-请根据主题撰写一份完整文档。
-
-文档类型：${template.category} / ${template.name}
-主题：${draft.topic}
-预计篇幅：约 ${draft.expectedPages} 页
-
-内置写作要求：
-${template.requirements}
-
-${draft.templateText.trim().isEmpty ? '' : '用户上传的 docx 模板解析内容如下，请严格参考其结构、栏目、语气和格式层级：\n${_clip(draft.templateText, 12000)}\n'}
-${draft.references.isEmpty ? '' : '参考资料如下，请优先依据这些资料进行事实陈述、问题分析、数据口径和论证组织：\n${_formatReferences(draft.references)}\n'}
-输出要求：
-- 使用中文。
-- 使用 Markdown 表达标题层级、条款、表格和列表，方便编辑。
-- 公文类必须符合国家公文处理与格式规范的写法，标题、主送机关、正文、落款、日期等要素齐备。
-- 篇幅控制在约 ${draft.expectedPages} 页，内容密度与正式文档相匹配。
-- 不编造具体单位名称、真实文号、联系人、金额等敏感事实；确需用户补充处用【待补充：...】标注。
-- 内容要可直接作为正式初稿继续修改。
-''',
-        },
-      ]);
+      // 多工作表 Excel 文档与普通文稿用不同的提示词。
+      final reply = await _chat(
+        draft.spreadsheet
+            ? _spreadsheetMessages(draft)
+            : _documentMessages(draft),
+      );
       draft.content = reply.trim();
       draft.updatedAt = DateTime.now();
       stage = '生成完成';
@@ -479,6 +477,77 @@ ${draft.references.isEmpty ? '' : '参考资料如下，请优先依据这些资
       busy = false;
       notifyListeners();
     }
+  }
+
+  List<Map<String, String>> _documentMessages(DocumentDraft draft) {
+    final template = templateOf(draft.templateId);
+    return [
+      {
+        'role': 'system',
+        'content':
+            '你是严谨的中文文档写作专家，熟悉党政机关公文、产品需求、项目申报、制度文件和研究报告写作。只输出文档正文，不解释。',
+      },
+      {
+        'role': 'user',
+        'content':
+            '''
+请根据主题撰写一份完整文档。
+
+文档类型：${template.category} / ${template.name}
+主题：${draft.topic}
+预计篇幅：约 ${draft.expectedPages} 页
+
+内置写作要求：
+${template.requirements}
+
+${draft.templateText.trim().isEmpty ? '' : '用户上传的模板（docx 或 Excel）解析内容如下，请严格参考其结构、栏目和格式层级（Excel 模板含多个工作表，已用「## 工作表：名称」分隔，请按各工作表的栏目逐一组织内容）：\n${_clip(draft.templateText, 12000)}\n'}
+${draft.references.isEmpty ? '' : '参考资料如下，请优先依据这些资料进行事实陈述、问题分析、数据口径和论证组织：\n${_formatReferences(draft.references)}\n'}
+输出要求：
+- 使用中文。
+- 使用 Markdown 表达标题层级、条款、表格和列表，方便编辑。
+- 公文类必须符合国家公文处理与格式规范的写法，标题、主送机关、正文、落款、日期等要素齐备。
+- 篇幅控制在约 ${draft.expectedPages} 页，内容密度与正式文档相匹配。
+- 不编造具体单位名称、真实文号、联系人、金额等敏感事实；确需用户补充处用【待补充：...】标注。
+- 内容要可直接作为正式初稿继续修改。
+''',
+      },
+    ];
+  }
+
+  /// 多工作表 Excel 文档的提示词：要求模型按「## 工作表：名称 + Markdown 表格」组织内容，
+  /// 便于后续按 sheet 解析并导出为 .xlsx。
+  List<Map<String, String>> _spreadsheetMessages(DocumentDraft draft) {
+    final template = templateOf(draft.templateId);
+    return [
+      {
+        'role': 'system',
+        'content':
+            '你是严谨的中文需求/数据文档专家，擅长把内容组织成多工作表的 Excel 表格。'
+                '严格按要求的格式输出，不要输出任何额外说明。',
+      },
+      {
+        'role': 'user',
+        'content':
+            '''
+请根据主题，按「多工作表 Excel」的形式准备内容。
+
+文档类型：${template.category} / ${template.name}
+主题：${draft.topic}
+
+内容要求（用于把握每个工作表该填什么）：
+${template.requirements}
+
+${draft.templateText.trim().isEmpty ? '' : '用户上传的 Excel 模板已解析如下（用「## 工作表：名称」分隔各工作表，并列出其列名/栏目），请严格沿用这些工作表名与列名：\n${_clip(draft.templateText, 12000)}\n'}
+${draft.references.isEmpty ? '' : '参考资料如下，请优先依据这些资料填写：\n${_formatReferences(draft.references)}\n'}
+输出格式（务必严格遵守，便于导出为 Excel）：
+- 每个工作表用一个二级标题表示：`## 工作表：<工作表名称>`
+- 紧接着用一个 Markdown 表格表示该工作表内容：第一行是表头（列名），其后每行一条数据。
+- 工作表名与列名尽量沿用上传模板里的设定。
+- 单元格内容简洁、准确；不编造单位名称、真实文号、金额等敏感信息，需用户补充处用【待补充：...】标注。
+- 除了「## 工作表：」标题行和 Markdown 表格外，不要输出任何其它说明文字。
+''',
+      },
+    ];
   }
 
   Future<String> _readDocxText(File file) async {
@@ -578,6 +647,84 @@ ${draft.references.isEmpty ? '' : '参考资料如下，请优先依据这些资
     return out.length > 30000 ? out.substring(0, 30000) : out;
   }
 
+  /// 读取 xlsx 模板：按真实工作表名输出多 sheet 结构，供模型按表结构生成。
+  /// 与参考文档的 _readXlsxText 不同——这里用工作表真名（如「功能清单」），
+  /// 因为模板的栏目/表名是生成时要遵循的关键结构信息。
+  Future<String> _readXlsxTemplate(File file) async {
+    final archive = ZipDecoder().decodeBytes(await file.readAsBytes());
+    final sharedStrings = _xlsxSharedStrings(archive);
+    final sheets = _xlsxSheetTargets(archive);
+    if (sheets.isEmpty) throw Exception('不是有效的 xlsx 文件：缺少工作表');
+
+    final buf = StringBuffer();
+    for (final sheet in sheets) {
+      final f = archive.findFile(sheet.path);
+      if (f == null) continue;
+      final xml = XmlDocument.parse(utf8.decode(f.content));
+      buf.writeln('## 工作表：${sheet.name}');
+      for (final row in xml.descendants.whereType<XmlElement>().where(
+        (e) => e.name.local == 'row',
+      )) {
+        final values = <String>[];
+        for (final cell in row.children.whereType<XmlElement>().where(
+          (e) => e.name.local == 'c',
+        )) {
+          values.add(_xlsxCellText(cell, sharedStrings));
+        }
+        final line = values
+            .map((v) => v.trim())
+            .where((v) => v.isNotEmpty)
+            .join(' | ');
+        if (line.isNotEmpty) buf.writeln('- $line');
+        if (buf.length >= 30000) break;
+      }
+      buf.writeln();
+      if (buf.length >= 30000) break;
+    }
+    final out = buf.toString().trim();
+    return out.length > 30000 ? out.substring(0, 30000) : out;
+  }
+
+  /// 解析工作簿，返回按显示顺序排列的工作表（真名 + worksheet 路径）。
+  List<({String name, String path})> _xlsxSheetTargets(Archive archive) {
+    final wb = archive.findFile('xl/workbook.xml');
+    final rels = archive.findFile('xl/_rels/workbook.xml.rels');
+    if (wb == null || rels == null) return const [];
+    // 先建立 rId → 目标路径 的映射。
+    final relMap = <String, String>{};
+    for (final r in XmlDocument.parse(
+      utf8.decode(rels.content),
+    ).descendants.whereType<XmlElement>().where(
+      (e) => e.name.local == 'Relationship',
+    )) {
+      final id = r.getAttribute('Id');
+      final target = r.getAttribute('Target');
+      if (id != null && target != null) relMap[id] = target;
+    }
+    // 再按 workbook.xml 里 <sheet> 的顺序取真名，经 r:id 找到对应文件。
+    final out = <({String name, String path})>[];
+    for (final s in XmlDocument.parse(
+      utf8.decode(wb.content),
+    ).descendants.whereType<XmlElement>().where(
+      (e) => e.name.local == 'sheet',
+    )) {
+      final name = s.getAttribute('name') ?? '工作表';
+      final rid = s.attributes
+          .firstWhere(
+            (a) => a.name.local == 'id',
+            orElse: () => XmlAttribute(XmlName('id'), ''),
+          )
+          .value;
+      final target = relMap[rid];
+      if (target == null) continue;
+      final path = target.startsWith('/')
+          ? target.substring(1)
+          : 'xl/$target';
+      out.add((name: name, path: path));
+    }
+    return out;
+  }
+
   List<String> _xlsxSharedStrings(Archive archive) {
     final file = archive.findFile('xl/sharedStrings.xml');
     if (file == null) return const [];
@@ -657,6 +804,190 @@ ${draft.references.isEmpty ? '' : '参考资料如下，请优先依据这些资
     final bytes = ZipEncoder().encode(archive);
     await out.writeAsBytes(bytes);
   }
+
+  // ---------------------------------------------------------------------------
+  // 导出 Excel：把按「## 工作表：名称 + Markdown 表格」组织的正文写成 .xlsx
+  // ---------------------------------------------------------------------------
+
+  Future<void> _writeXlsx(DocumentDraft draft, File out) async {
+    final sheets = parseSheets(draft.content);
+    if (sheets.isEmpty) {
+      throw Exception('未识别到工作表结构，无法导出 Excel（内容需以「## 工作表：名称」分节）');
+    }
+    final used = <String>{};
+    final named = [
+      for (final s in sheets) (name: _safeSheetName(s.name, used), rows: s.rows),
+    ];
+
+    final archive = Archive();
+    final ctOverrides = StringBuffer();
+    final sheetsXml = StringBuffer();
+    final relsXml = StringBuffer();
+    for (var i = 0; i < named.length; i++) {
+      final id = i + 1;
+      ctOverrides.write(
+        '<Override PartName="/xl/worksheets/sheet$id.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>',
+      );
+      sheetsXml.write(
+        '<sheet name="${_xmlAttr(named[i].name)}" sheetId="$id" r:id="rId$id"/>',
+      );
+      relsXml.write(
+        '<Relationship Id="rId$id" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+        'Target="worksheets/sheet$id.xml"/>',
+      );
+    }
+
+    archive.addFile(
+      ArchiveFile.string(
+        '[Content_Types].xml',
+        '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+$ctOverrides
+</Types>''',
+      ),
+    );
+    archive.addFile(
+      ArchiveFile.string(
+        '_rels/.rels',
+        '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>''',
+      ),
+    );
+    archive.addFile(
+      ArchiveFile.string(
+        'xl/workbook.xml',
+        '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets>$sheetsXml</sheets>
+</workbook>''',
+      ),
+    );
+    archive.addFile(
+      ArchiveFile.string(
+        'xl/_rels/workbook.xml.rels',
+        '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">$relsXml</Relationships>''',
+      ),
+    );
+    for (var i = 0; i < named.length; i++) {
+      archive.addFile(
+        ArchiveFile.string(
+          'xl/worksheets/sheet${i + 1}.xml',
+          _sheetXml(named[i].rows),
+        ),
+      );
+    }
+    final bytes = ZipEncoder().encode(archive);
+    await out.writeAsBytes(bytes);
+  }
+
+  static String _sheetXml(List<List<String>> rows) {
+    final buf = StringBuffer()
+      ..write('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>')
+      ..write(
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>',
+      );
+    for (var r = 0; r < rows.length; r++) {
+      buf.write('<row r="${r + 1}">');
+      for (var c = 0; c < rows[r].length; c++) {
+        final ref = '${_colLetter(c)}${r + 1}';
+        final text = const HtmlEscape().convert(rows[r][c]);
+        buf.write(
+          '<c r="$ref" t="inlineStr"><is><t xml:space="preserve">$text</t></is></c>',
+        );
+      }
+      buf.write('</row>');
+    }
+    buf.write('</sheetData></worksheet>');
+    return buf.toString();
+  }
+
+  /// 把正文按「## 工作表：名称」分节，每节下的 Markdown 表格解析成行/列。
+  /// 公开给 UI 做分 sheet 预览，也用于导出 xlsx。
+  static List<({String name, List<List<String>> rows})> parseSheets(
+    String content,
+  ) {
+    final sheets = <({String name, List<List<String>> rows})>[];
+    String? name;
+    var rows = <List<String>>[];
+    void flush() {
+      final n = name;
+      if (n != null) sheets.add((name: n, rows: rows));
+      rows = <List<String>>[];
+    }
+
+    for (final raw in content.replaceAll('\r\n', '\n').split('\n')) {
+      final line = raw.trim();
+      final head = RegExp(r'^#{1,6}\s*工作表[:：]\s*(.+)$').firstMatch(line);
+      if (head != null) {
+        flush();
+        name = head.group(1)!.trim();
+        continue;
+      }
+      if (name == null || line.isEmpty) continue;
+      if (line.startsWith('|')) {
+        var t = line;
+        if (t.startsWith('|')) t = t.substring(1);
+        if (t.endsWith('|')) t = t.substring(0, t.length - 1);
+        final cells = t.split('|').map((e) => e.trim()).toList();
+        // 跳过 |---| 分隔行。
+        if (cells.every((c) => RegExp(r'^:?-{2,}:?$').hasMatch(c))) continue;
+        rows.add(cells.map(_stripMd).toList());
+      } else {
+        // 非表格的说明行也保留为单格一行，避免丢内容。
+        rows.add([_stripMd(line)]);
+      }
+    }
+    flush();
+    return sheets;
+  }
+
+  /// 去掉单元格文本里的常见 Markdown 标记，得到纯文本。
+  static String _stripMd(String s) => s
+      .replaceAll(RegExp(r'^[-*+]\s+'), '')
+      .replaceAll(RegExp(r'^#{1,6}\s*'), '')
+      .replaceAll('**', '')
+      .replaceAll('`', '')
+      .trim();
+
+  /// Excel 工作表名限制：≤31 字符、不含 : \ / ? * [ ]，且需唯一。
+  static String _safeSheetName(String raw, Set<String> used) {
+    var n = raw.replaceAll(RegExp(r'[:\\/?*\[\]]'), ' ').trim();
+    if (n.isEmpty) n = '工作表';
+    if (n.length > 31) n = n.substring(0, 31);
+    var unique = n;
+    var i = 1;
+    while (used.contains(unique)) {
+      final suffix = '_${i++}';
+      unique = n.length + suffix.length > 31
+          ? n.substring(0, 31 - suffix.length) + suffix
+          : n + suffix;
+    }
+    used.add(unique);
+    return unique;
+  }
+
+  /// 列序号转字母：0→A, 25→Z, 26→AA …
+  static String _colLetter(int index) {
+    var i = index;
+    var s = '';
+    while (true) {
+      s = String.fromCharCode(65 + (i % 26)) + s;
+      i = i ~/ 26 - 1;
+      if (i < 0) break;
+    }
+    return s;
+  }
+
+  static String _xmlAttr(String s) =>
+      const HtmlEscape(HtmlEscapeMode.attribute).convert(s);
 
   Future<void> _printHtmlToPdf(File html, File out) async {
     final browser = _browserPath();
