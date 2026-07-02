@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
 import '../services/document_service.dart';
+import 'sheet_grid.dart';
 
 const _accent = Color(0xFF0D9488);
 const _sub = Color(0xFF6B6B70);
@@ -277,6 +278,15 @@ class _DocumentPageState extends State<DocumentPage> {
             label: const Text('生成文档'),
           ),
           const SizedBox(width: 8),
+          // 继续完善：只针对用户指出的地方补充，已有内容原样保留。
+          OutlinedButton.icon(
+            onPressed: (svc.busy || draft.content.trim().isEmpty)
+                ? null
+                : () => _refine(svc),
+            icon: const Icon(Icons.auto_fix_high_outlined, size: 16),
+            label: const Text('继续完善'),
+          ),
+          const SizedBox(width: 8),
           OutlinedButton.icon(
             onPressed: svc.busy ? null : () => _export(svc),
             icon: const Icon(Icons.ios_share, size: 16),
@@ -538,7 +548,7 @@ class _DocumentPageState extends State<DocumentPage> {
           ),
           Expanded(
             child: TabBarView(
-              children: [for (final s in sheets) _SheetTableView(s.rows)],
+              children: [for (final s in sheets) SheetGrid(rows: s.rows)],
             ),
           ),
         ],
@@ -807,6 +817,62 @@ class _DocumentPageState extends State<DocumentPage> {
     }
   }
 
+  /// 继续完善：让用户输入要补充/完善的地方，针对性补充，已有内容原样保留。
+  Future<void> _refine(DocumentService svc) async {
+    final input = TextEditingController();
+    final instruction = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('继续完善'),
+        content: SizedBox(
+          width: 460,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '说明要继续补充/完善的地方（例如「补充 05 关键数据调研工作表的示例数据」）。'
+                'AI 只针对你指出的地方补充，其余已有内容会原样保留。',
+                style: TextStyle(fontSize: 12.5, color: _sub),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: input,
+                autofocus: true,
+                maxLines: 5,
+                minLines: 3,
+                style: const TextStyle(fontSize: 13.5),
+                decoration: const InputDecoration(
+                  hintText: '要继续完善的内容…',
+                  border: OutlineInputBorder(),
+                  contentPadding: EdgeInsets.all(12),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, input.text.trim()),
+            child: const Text('开始完善'),
+          ),
+        ],
+      ),
+    );
+    input.dispose();
+    if (instruction == null || instruction.isEmpty) return;
+    // 先把编辑框里的最新内容存回，避免完善基于旧内容。
+    await _save(svc, showToast: false);
+    await svc.refine(instruction);
+    _boundId = null;
+    _bind(svc.current);
+    if (svc.stage.startsWith('完善失败')) _toast(svc.stage);
+  }
+
   Future<void> _export(DocumentService svc) async {
     final draft = svc.current;
     if (draft == null) return;
@@ -936,80 +1002,3 @@ class _DocumentPageState extends State<DocumentPage> {
   );
 }
 
-/// 单个工作表的表格预览：首行作表头，带常驻的横向/纵向滚动条，内容看得全。
-/// 用独立 StatefulWidget 持有各自的 ScrollController，避免 tab 间共享冲突。
-class _SheetTableView extends StatefulWidget {
-  const _SheetTableView(this.rows);
-
-  final List<List<String>> rows;
-
-  @override
-  State<_SheetTableView> createState() => _SheetTableViewState();
-}
-
-class _SheetTableViewState extends State<_SheetTableView> {
-  final _vertical = ScrollController();
-  final _horizontal = ScrollController();
-
-  @override
-  void dispose() {
-    _vertical.dispose();
-    _horizontal.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final rows = widget.rows;
-    if (rows.isEmpty) {
-      return const Center(
-        child: Text('（本工作表暂无内容）', style: TextStyle(fontSize: 13, color: _muted)),
-      );
-    }
-    final cols = rows.map((r) => r.length).reduce((a, b) => a > b ? a : b);
-    String at(List<String> row, int c) => c < row.length ? row[c] : '';
-    return Scrollbar(
-      controller: _vertical,
-      thumbVisibility: true,
-      child: SingleChildScrollView(
-        controller: _vertical,
-        scrollDirection: Axis.vertical,
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
-        child: Scrollbar(
-          controller: _horizontal,
-          thumbVisibility: true,
-          child: SingleChildScrollView(
-            controller: _horizontal,
-            scrollDirection: Axis.horizontal,
-            child: DataTable(
-              headingRowColor: WidgetStateProperty.all(const Color(0xFFF3F4F6)),
-              headingTextStyle: const TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w700,
-                color: Colors.black,
-              ),
-              dataTextStyle: const TextStyle(
-                fontSize: 12.5,
-                color: Colors.black,
-              ),
-              border: TableBorder.all(color: const Color(0xFFD8D8DC)),
-              columns: [
-                for (var c = 0; c < cols; c++)
-                  DataColumn(label: Text(at(rows.first, c))),
-              ],
-              rows: [
-                for (var r = 1; r < rows.length; r++)
-                  DataRow(
-                    cells: [
-                      for (var c = 0; c < cols; c++)
-                        DataCell(Text(at(rows[r], c))),
-                    ],
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}

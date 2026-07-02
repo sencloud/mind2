@@ -21,6 +21,10 @@ class ToolContext {
   /// 当前 agent 的嵌套深度（主 agent=0，子 agent 递增）。
   final int depth;
 
+  /// 工作记事板（由 update_working_checkpoint 工具覆写）：
+  /// 长任务的中间结论备忘，上下文压缩后由 Compactor 以 system-reminder 保留。
+  String workingCheckpoint = '';
+
   String get root => projectDir.path;
 }
 

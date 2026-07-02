@@ -34,6 +34,7 @@ class AgentLoop {
     required this.registry,
     required this.executor,
     this.maxTurns = 0,
+    this.checkpoint,
   })  : _orchestrator =
             ToolOrchestrator(registry: registry, executor: executor),
         _compactor = Compactor();
@@ -42,6 +43,10 @@ class AgentLoop {
   final ToolRegistry registry;
   final ToolExecutor executor;
   final int maxTurns;
+
+  /// 工作记事板读取器（来自 ToolContext）；压缩发生时由 Compactor 保留其内容。
+  final String Function()? checkpoint;
+
   final ToolOrchestrator _orchestrator;
   final Compactor _compactor;
 
@@ -68,7 +73,8 @@ class AgentLoop {
       }
       turn++;
 
-      messages = _compactor.compact(messages);
+      messages =
+          _compactor.compact(messages, checkpoint: checkpoint?.call() ?? '');
       final tools = registry.toApiSchema();
 
       AssistantTurn t;

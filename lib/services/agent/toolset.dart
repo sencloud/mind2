@@ -3,6 +3,7 @@ import 'model_client.dart';
 import 'tool.dart';
 import 'tool_registry.dart';
 import 'tools/bash_tool.dart';
+import 'tools/checkpoint_tool.dart';
 import 'tools/deep_research_tool.dart';
 import 'tools/edit_tool.dart';
 import 'tools/glob_tool.dart';
@@ -60,6 +61,8 @@ class AgentToolset {
         BashTool(),
         GlobTool(),
         GrepTool(),
+        // 工作记事板：长任务中间结论防丢（与 Compactor 联动）。
+        CheckpointTool(),
         ...shared,
       ]);
       // 主题研究较重且不可并发，只给顶层 agent（depth==0）提供，避免子 agent 嵌套触发。

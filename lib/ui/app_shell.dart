@@ -2,12 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../models.dart';
+import '../services/agent/memory/memory_service.dart';
 import '../services/book_service.dart';
 import '../services/chat_service.dart';
 import '../services/document_service.dart';
 import '../services/experiment_service.dart';
 import '../services/file_library_service.dart';
 import '../services/library_service.dart';
+import '../services/mind_map_service.dart';
 import '../services/paper_service.dart';
 import '../services/plan_service.dart';
 import '../services/playwright_service.dart';
@@ -29,6 +31,7 @@ class AppShell extends StatefulWidget {
   const AppShell({
     super.key,
     required this.settings,
+    required this.memory,
     required this.library,
     required this.fileLibrary,
     required this.chat,
@@ -39,12 +42,14 @@ class AppShell extends StatefulWidget {
     required this.project,
     required this.document,
     required this.proBook,
+    required this.mindMap,
     required this.book,
     required this.paper,
     required this.plan,
   });
 
   final SettingsService settings;
+  final MemoryService memory;
   final LibraryService library;
   final FileLibraryService fileLibrary;
   final ChatService chat;
@@ -55,6 +60,7 @@ class AppShell extends StatefulWidget {
   final ProjectService project;
   final DocumentService document;
   final ProBookService proBook;
+  final MindMapService mindMap;
   final BookService book;
   final PaperService paper;
   final PlanService plan;
@@ -102,6 +108,7 @@ class _AppShellState extends State<AppShell> {
         library: widget.library,
         settings: widget.settings,
         topicService: widget.topicService,
+        memory: widget.memory,
         onOpenNote: _openNote,
         onOpenTopic: () => setState(() => _index = 3),
       ),
@@ -161,6 +168,7 @@ class _AppShellState extends State<AppShell> {
         key: ValueKey('writing$_writingToken'),
         document: widget.document,
         proBook: widget.proBook,
+        mindMap: widget.mindMap,
         book: widget.book,
         paper: widget.paper,
         initialTab: _writingTab,
@@ -216,31 +224,52 @@ class _AppShellState extends State<AppShell> {
                 collapsed ? 22 : 20,
                 12,
               ),
-              child: Row(
-                mainAxisAlignment: collapsed
-                    ? MainAxisAlignment.center
-                    : MainAxisAlignment.start,
-                children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: Image.asset(
-                      'assets/icon/app_icon.png',
-                      width: 28,
-                      height: 28,
-                      fit: BoxFit.cover,
-                    ),
-                  ),
-                  if (!collapsed) ...[
-                    const SizedBox(width: 10),
-                    const Text(
-                      '第二大脑',
-                      style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
+              // 用横向不可滚动的 SingleChildScrollView 包裹，避免侧栏折叠/展开
+              // 动画期间（宽度在动、padding 已切换）内容瞬时放不下而报 RenderFlex 溢出。
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                physics: const NeverScrollableScrollPhysics(),
+                child: Row(
+                  mainAxisAlignment: collapsed
+                      ? MainAxisAlignment.center
+                      : MainAxisAlignment.start,
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: Image.asset(
+                        'assets/icon/app_icon.png',
+                        width: 28,
+                        height: 28,
+                        fit: BoxFit.cover,
                       ),
                     ),
+                    if (!collapsed) ...[
+                      const SizedBox(width: 10),
+                      // 标题 + 说明：第二大脑——自进化智能体
+                      const Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            '第二大脑',
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          SizedBox(height: 1),
+                          Text(
+                            '自进化智能体',
+                            style: TextStyle(
+                              fontSize: 10.5,
+                              color: Color(0xFF9B9B9F),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
                   ],
-                ],
+                ),
               ),
             ),
           ),

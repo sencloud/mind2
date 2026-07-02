@@ -76,6 +76,7 @@ class SubAgentTool extends AgentTool {
       registry: registry,
       executor: executor,
       maxTurns: toolset.subAgentMaxTurns,
+      checkpoint: () => childCtx.workingCheckpoint,
     );
 
     final result = await loop.run(

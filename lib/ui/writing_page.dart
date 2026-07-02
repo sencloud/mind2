@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 
 import '../services/book_service.dart';
 import '../services/document_service.dart';
+import '../services/mind_map_service.dart';
 import '../services/paper_service.dart';
 import '../services/pro_book_service.dart';
 import 'book_page.dart';
 import 'document_page.dart';
+import 'mind_map_page.dart';
 import 'paper_page.dart';
 import 'pro_book_page.dart';
 
@@ -14,6 +16,7 @@ class WritingPage extends StatefulWidget {
     super.key,
     required this.document,
     required this.proBook,
+    required this.mindMap,
     required this.book,
     required this.paper,
     this.initialTab = 0,
@@ -21,10 +24,11 @@ class WritingPage extends StatefulWidget {
 
   final DocumentService document;
   final ProBookService proBook;
+  final MindMapService mindMap;
   final BookService book;
   final PaperService paper;
 
-  /// 0=文档，1=专业书籍，2=小说，3=论文。
+  /// 0=文档，1=专业书籍，2=小说，3=论文，4=思维导图。
   final int initialTab;
 
   @override
@@ -70,6 +74,11 @@ class _WritingPageState extends State<WritingPage> {
                     label: Text('文档'),
                   ),
                   ButtonSegment(
+                    value: 4,
+                    icon: Icon(Icons.account_tree_outlined, size: 16),
+                    label: Text('思维导图'),
+                  ),
+                  ButtonSegment(
                     value: 1,
                     icon: Icon(Icons.menu_book_outlined, size: 16),
                     label: Text('专业书籍'),
@@ -101,6 +110,7 @@ class _WritingPageState extends State<WritingPage> {
               ProBookPage(service: widget.proBook),
               BookPage(book: widget.book),
               PaperPage(paper: widget.paper),
+              MindMapPage(service: widget.mindMap),
             ],
           ),
         ),

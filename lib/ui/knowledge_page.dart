@@ -4,12 +4,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
 import '../models.dart';
+import '../services/agent/memory/memory_service.dart';
 import '../services/ai_client.dart';
 import '../services/knowledge_service.dart';
 import '../services/library_service.dart';
 import '../services/settings_service.dart';
 import '../services/topic_service.dart';
 import 'graph_page.dart';
+import 'skill_library_view.dart';
 
 class KnowledgePage extends StatefulWidget {
   const KnowledgePage({
@@ -17,6 +19,7 @@ class KnowledgePage extends StatefulWidget {
     required this.library,
     required this.settings,
     required this.topicService,
+    required this.memory,
     required this.onOpenNote,
     required this.onOpenTopic,
   });
@@ -24,6 +27,7 @@ class KnowledgePage extends StatefulWidget {
   final LibraryService library;
   final SettingsService settings;
   final TopicFetchService topicService;
+  final MemoryService memory;
   final void Function(StandardNote) onOpenNote;
   final VoidCallback onOpenTopic;
 
@@ -33,7 +37,7 @@ class KnowledgePage extends StatefulWidget {
 
 class _KnowledgePageState extends State<KnowledgePage>
     with SingleTickerProviderStateMixin {
-  late final TabController _tab = TabController(length: 2, vsync: this);
+  late final TabController _tab = TabController(length: 3, vsync: this);
   late final AiClient _ai = AiClient(widget.settings);
 
   bool _aiLoading = false;
@@ -160,6 +164,7 @@ ${KnowledgeAnalyzer.summaryForAi(o)}
                   tabs: const [
                     Tab(text: '体系概览'),
                     Tab(text: '关联网络'),
+                    Tab(text: '技能库'),
                   ],
                 ),
               ),
@@ -185,6 +190,8 @@ ${KnowledgeAnalyzer.summaryForAi(o)}
                         style: TextStyle(color: Color(0xFF9B9B9F)),
                       ),
                     ),
+              // 技能库：Agent 自动沉淀的可复用执行路径（L3 记忆）。
+              SkillLibraryView(memory: widget.memory),
             ],
           ),
         ),

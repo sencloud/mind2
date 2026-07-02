@@ -479,6 +479,105 @@ class DocumentService extends ChangeNotifier {
     }
   }
 
+  /// 继续完善：只针对 [instruction] 指出的地方补充/细化，其余已有内容原样保留。
+  /// 模型返回完整的更新后正文，替换 draft.content。
+  Future<void> refine(String instruction) async {
+    final draft = current;
+    if (draft == null || busy) return;
+    if (draft.content.trim().isEmpty) {
+      stage = '请先生成文档，再继续完善';
+      notifyListeners();
+      return;
+    }
+    if (instruction.trim().isEmpty) return;
+    busy = true;
+    stage = '正在继续完善…';
+    notifyListeners();
+    try {
+      final reply = await _chat(
+        draft.spreadsheet
+            ? _refineSpreadsheetMessages(draft, instruction)
+            : _refineDocumentMessages(draft, instruction),
+      );
+      final next = reply.trim();
+      if (next.isEmpty) throw Exception('模型未返回内容');
+      draft.content = next;
+      draft.updatedAt = DateTime.now();
+      stage = '完善完成';
+      await _persist();
+    } catch (e) {
+      stage = '完善失败：$e';
+    } finally {
+      busy = false;
+      notifyListeners();
+    }
+  }
+
+  List<Map<String, String>> _refineDocumentMessages(
+    DocumentDraft draft,
+    String instruction,
+  ) {
+    return [
+      {
+        'role': 'system',
+        'content': '你是严谨的中文文档写作专家。只输出更新后的文档正文，不解释。',
+      },
+      {
+        'role': 'user',
+        'content':
+            '''
+下面是这份文档的现有正文。请只针对我指出的地方进行补充和完善，其它已有内容必须原样保留，不要改写、删减或调整顺序。
+
+需要继续完善的地方：
+$instruction
+
+${draft.references.isEmpty ? '' : '可参考的资料：\n${_formatReferences(draft.references)}\n'}
+现有正文：
+${draft.content}
+
+输出要求：
+- 输出完整的更新后正文（含未改动的部分），使用 Markdown。
+- 只在我指出的地方做补充/细化；其余部分逐字保留，不要改动。
+- 不编造具体单位名称、真实文号、金额等敏感事实，需补充处用【待补充：...】标注。
+''',
+      },
+    ];
+  }
+
+  List<Map<String, String>> _refineSpreadsheetMessages(
+    DocumentDraft draft,
+    String instruction,
+  ) {
+    return [
+      {
+        'role': 'system',
+        'content':
+            '你是严谨的中文需求/数据文档专家。只输出更新后的、按工作表组织的内容，不解释。',
+      },
+      {
+        'role': 'user',
+        'content':
+            '''
+下面是这份「多工作表 Excel」文档的现有内容（用「## 工作表：名称」分节 + Markdown 表格）。
+请只针对我指出的地方补充/完善，其它工作表与已有行必须原样保留。
+
+需要继续完善的地方：
+$instruction
+
+${draft.references.isEmpty ? '' : '可参考的资料：\n${_formatReferences(draft.references)}\n'}
+现有内容：
+${draft.content}
+
+输出要求：
+- 保持「## 工作表：名称」+ Markdown 表格 的格式。
+- 只在我指出的工作表/内容上做补充或细化；其余工作表与已有行逐字保留，不要改动。
+- 输出完整的更新后内容，除工作表标题与表格外不要输出其它说明文字。
+- 不编造敏感信息，需补充处用【待补充：...】标注。
+''',
+      },
+    ];
+  }
+
   List<Map<String, String>> _documentMessages(DocumentDraft draft) {
     final template = templateOf(draft.templateId);
     return [

@@ -293,8 +293,11 @@ class _BookPageState extends State<BookPage> {
               const SizedBox(height: 8),
               Row(
                 children: [
-                  if (book.genre.isNotEmpty) _chip(book.genre),
+                  // 流派名可能很长，用 Flexible 让 chip 收缩并省略，避免整行溢出。
+                  if (book.genre.isNotEmpty)
+                    Flexible(child: _chip(book.genre)),
                   const Spacer(),
+                  const SizedBox(width: 8),
                   Text(
                     '${book.volumes.length} 篇 · ${book.doneChapters}/${book.totalChapters} 章 · ${book.totalWords} 字',
                     style: const TextStyle(fontSize: 11.5, color: _muted),
@@ -316,6 +319,9 @@ class _BookPageState extends State<BookPage> {
     ),
     child: Text(
       text,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      softWrap: false,
       style: const TextStyle(
         fontSize: 11,
         color: _accent,

@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 
 import '../models.dart';
+import '../services/agent/memory/memory_service.dart';
 import '../services/book_service.dart';
 import '../services/chat_service.dart';
 import '../services/document_service.dart';
 import '../services/file_library_service.dart';
 import '../services/library_service.dart';
+import '../services/mind_map_service.dart';
 import '../services/paper_service.dart';
 import '../services/pro_book_service.dart';
 import '../services/settings_service.dart';
@@ -21,23 +23,27 @@ class MobileAppShell extends StatefulWidget {
   const MobileAppShell({
     super.key,
     required this.settings,
+    required this.memory,
     required this.library,
     required this.fileLibrary,
     required this.chat,
     required this.topicService,
     required this.document,
     required this.proBook,
+    required this.mindMap,
     required this.book,
     required this.paper,
   });
 
   final SettingsService settings;
+  final MemoryService memory;
   final LibraryService library;
   final FileLibraryService fileLibrary;
   final ChatService chat;
   final TopicFetchService topicService;
   final DocumentService document;
   final ProBookService proBook;
+  final MindMapService mindMap;
   final BookService book;
   final PaperService paper;
 
@@ -99,12 +105,14 @@ class _MobileAppShellState extends State<MobileAppShell> {
         library: widget.library,
         settings: widget.settings,
         topicService: widget.topicService,
+        memory: widget.memory,
         onOpenNote: _openNote,
         onOpenTopic: () => setState(() => _index = 2),
       ),
       WritingPage(
         document: widget.document,
         proBook: widget.proBook,
+        mindMap: widget.mindMap,
         book: widget.book,
         paper: widget.paper,
       ),
@@ -113,7 +121,17 @@ class _MobileAppShellState extends State<MobileAppShell> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('第二大脑'),
+        title: const Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('第二大脑', style: TextStyle(fontSize: 18)),
+            Text(
+              '自进化智能体',
+              style: TextStyle(fontSize: 10.5, color: Color(0xFF9B9B9F)),
+            ),
+          ],
+        ),
         actions: [
           IconButton(
             tooltip: '设置',

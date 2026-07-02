@@ -2615,6 +2615,8 @@ ${_clipContext(note.body, 12000)}
     'grep' => Icons.search,
     'tool_search' => Icons.travel_explore,
     'task' => Icons.account_tree_outlined,
+    'skill' => Icons.auto_awesome,
+    'update_working_checkpoint' => Icons.push_pin_outlined,
     _ => Icons.build_outlined,
   };
 

@@ -122,6 +122,16 @@ ${projectManifest.trim().isEmpty ? '(空)' : projectManifest}
 
 只输出 JSON：{"files":["a.md","b.md"]}。没有相关的就返回 {"files":[]}。''';
 
+  /// 自进化守则（对应 GenericAgent 的 L0 元规则补充）：
+  /// 告诉 Agent 如何使用注入的技能 SOP 与工作记事板。
+  static const evolutionGuide = '''
+## 自进化守则
+- 若会话开头注入了「技能 SOP」（过去成功完成同类任务的标准流程），**优先按 SOP 执行**；
+  执行中发现 SOP 与现实不符时，以现实为准并自行探索，不要僵化照搬。
+- 长任务（预计超过 5 轮）中，请在关键节点调用 update_working_checkpoint 更新工作记事板：
+  写清「目标 / 已完成 / 下一步 / 关键结论」。上下文被压缩后记事板会保留，
+  这是你唯一不会丢失的短期备忘。切换阶段、得出重要中间结论时务必更新。''';
+
   /// 主动验证段（移植 TRUSTING_RECALL_SECTION）：记忆是时间快照，用前先核实。
   static const trustingRecall = '''
 ## 关于"回忆"的纪律

@@ -12,6 +12,7 @@ import 'services/document_service.dart';
 import 'services/experiment_service.dart';
 import 'services/file_library_service.dart';
 import 'services/library_service.dart';
+import 'services/mind_map_service.dart';
 import 'services/paper_service.dart';
 import 'services/plan_service.dart';
 import 'services/platform_capabilities.dart';
@@ -71,6 +72,7 @@ Future<void> main() async {
   final project = ProjectService(settings, memory, research: topic);
   final document = DocumentService(settings);
   final proBook = ProBookService(settings);
+  final mindMap = MindMapService(settings);
   final book = BookService(settings);
   final paper = PaperService(settings);
   // 「计划」：每日待办 + AI 分析并执行（复用统一 Agent 内核）。
@@ -85,6 +87,7 @@ Future<void> main() async {
   }
   await document.init();
   await proBook.init();
+  await mindMap.init();
   await book.init();
   await paper.init();
   await plan.init();
@@ -93,6 +96,7 @@ Future<void> main() async {
   runApp(
     MindApp(
       settings: settings,
+      memory: memory,
       library: library,
       fileLibrary: fileLibrary,
       chat: chat,
@@ -103,6 +107,7 @@ Future<void> main() async {
       project: project,
       document: document,
       proBook: proBook,
+      mindMap: mindMap,
       book: book,
       paper: paper,
       plan: plan,
@@ -116,6 +121,7 @@ class MindApp extends StatelessWidget {
   const MindApp({
     super.key,
     required this.settings,
+    required this.memory,
     required this.library,
     required this.fileLibrary,
     required this.chat,
@@ -126,12 +132,14 @@ class MindApp extends StatelessWidget {
     required this.project,
     required this.document,
     required this.proBook,
+    required this.mindMap,
     required this.book,
     required this.paper,
     required this.plan,
   });
 
   final SettingsService settings;
+  final MemoryService memory;
   final LibraryService library;
   final FileLibraryService fileLibrary;
   final ChatService chat;
@@ -142,6 +150,7 @@ class MindApp extends StatelessWidget {
   final ProjectService project;
   final DocumentService document;
   final ProBookService proBook;
+  final MindMapService mindMap;
   final BookService book;
   final PaperService paper;
   final PlanService plan;
@@ -164,17 +173,20 @@ class MindApp extends StatelessWidget {
       home: PlatformCapabilities.isMobile
           ? MobileAppShell(
               settings: settings,
+              memory: memory,
               library: library,
               fileLibrary: fileLibrary,
               chat: chat,
               topicService: topic,
               document: document,
               proBook: proBook,
+              mindMap: mindMap,
               book: book,
               paper: paper,
             )
           : AppShell(
               settings: settings,
+              memory: memory,
               library: library,
               fileLibrary: fileLibrary,
               chat: chat,
@@ -185,6 +197,7 @@ class MindApp extends StatelessWidget {
               project: project,
               document: document,
               proBook: proBook,
+              mindMap: mindMap,
               book: book,
               paper: paper,
               plan: plan,
