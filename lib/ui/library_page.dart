@@ -119,6 +119,9 @@ class _LibraryPageState extends State<LibraryPage> {
   final _editController = TextEditingController();
   final _myNoteController = TextEditingController();
 
+  /// 模态进度对话框当前显示的阶段文字（重新扫描 / 引入文件夹 用）。
+  final ValueNotifier<String> _progressPhase = ValueNotifier('');
+
   @override
   void initState() {
     super.initState();
@@ -133,6 +136,7 @@ class _LibraryPageState extends State<LibraryPage> {
     _editController.dispose();
     _myNoteController.dispose();
     _searchController.dispose();
+    _progressPhase.dispose();
     super.dispose();
   }
 
@@ -762,11 +766,84 @@ ${_clipContext(note.body, 12000)}
     widget.onOpenAsProject!(dir, note.filePath, note.fullTitle);
   }
 
-  /// 重新扫描：合并相同主题、去重资料，再为空白笔记自动生成内容。
-  Future<void> _rescan() async {
+  /// 在模态进度对话框中执行 [task]：执行期间界面被遮罩、无法操作其他功能，
+  /// 对话框内显示转圈与当前阶段/进度，任务结束后自动关闭。
+  Future<void> _runWithProgress(
+    String title,
+    Future<void> Function() task,
+  ) async {
+    var dialogClosed = false;
+    // 不 await：对话框与任务并行，任务结束后手动关闭。
+    // ignore: unawaited_futures
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          title: Text(title, style: const TextStyle(fontSize: 16)),
+          content: ListenableBuilder(
+            listenable: Listenable.merge([
+              widget.library,
+              widget.fileLibrary,
+              _progressPhase,
+            ]),
+            builder: (_, _) {
+              final lib = widget.library;
+              final fileLib = widget.fileLibrary;
+              var detail = _progressPhase.value;
+              if (lib.batchRunning) {
+                detail = '正在生成笔记内容 ${lib.batchDone}/${lib.batchTotal}';
+              } else if (fileLib.working) {
+                detail =
+                    '${fileLib.workingLabel} '
+                    '${fileLib.workingDone}/${fileLib.workingTotal}';
+              }
+              return Row(
+                children: [
+                  const SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(strokeWidth: 2.5),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Text(
+                      detail.isEmpty ? '正在处理…' : detail,
+                      style: const TextStyle(fontSize: 13.5),
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+    ).whenComplete(() => dialogClosed = true);
+    try {
+      await task();
+    } finally {
+      _progressPhase.value = '';
+      if (mounted && !dialogClosed) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+    }
+  }
+
+  /// 重新扫描：为文件库中未建笔记的文档补建分类笔记，合并相同主题、
+  /// 去重资料，再为空白笔记自动生成内容。全程模态进度框。
+  Future<void> _rescan() => _runWithProgress('重新扫描', () async {
+    _progressPhase.value = '正在扫描笔记…';
     await widget.library.reload();
 
-    _toast('正在合并相同主题、去重资料…');
+    // 文件库中还没有对应笔记的文档，先由 AI 归类并建立笔记。
+    _progressPhase.value = '正在为文档建立分类笔记…';
+    final indexed = await _indexLibraryDocuments();
+    if (indexed > 0) {
+      _toast('已为 $indexed 份文档建立分类笔记');
+    }
+
+    _progressPhase.value = '正在合并相同主题、去重资料…';
     final merged = await widget.library.consolidateCategories();
     if (merged > 0) await widget.library.reload();
     final removedNotes = await widget.library.dedupNotes();
@@ -783,9 +860,21 @@ ${_clipContext(note.body, 12000)}
       _toast('扫描完成，没有需要生成的空白笔记');
       return;
     }
-    _toast('开始为 $count 篇空白笔记生成内容…');
+    _progressPhase.value = '正在为 $count 篇空白笔记生成内容…';
     final failed = await widget.library.generateAllEmpty();
     _toast(failed == 0 ? '已自动生成 $count 篇笔记' : '生成完成，$failed 篇失败');
+  });
+
+  /// 为文件库「文档」类型中尚无笔记的文件建立分类笔记，返回新建数量。
+  Future<int> _indexLibraryDocuments() async {
+    final docs = widget.fileLibrary.filesOf(FileKind.document);
+    if (docs.isEmpty) return 0;
+    try {
+      return await widget.library.indexLibraryDocuments(docs);
+    } catch (e) {
+      _toast('文档归类失败：$e');
+      return 0;
+    }
   }
 
   Future<void> _importFiles() async {
@@ -796,6 +885,56 @@ ${_clipContext(note.body, 12000)}
     _toast('正在导入并自动归类 ${paths.length} 个文件…');
     final ok = await widget.fileLibrary.importFiles(paths);
     _toast('已导入 $ok 个文件并按类型归类');
+  }
+
+  /// 引入文件夹：把所选文件夹中的文档复制进「我的大脑」的文件库并按类型归类
+  /// （源文件夹保持不变），再为其中文档建立 AI 分类笔记并生成笔记内容。
+  Future<void> _importFolder() async {
+    final dir = await FilePicker.getDirectoryPath(
+      dialogTitle: '选择要引入的文件夹（其中文件将按类型复制到文件库）',
+    );
+    if (dir == null) return;
+    if (!mounted) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('引入文件夹'),
+        content: Text(
+          '将把以下文件夹中的所有文件，按类型复制到知识库的「文件库」中（源文件保持不变），'
+          '并为其中的文档自动生成 AI 笔记、放入分类：\n\n$dir',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('开始引入'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    await _runWithProgress('引入文件夹', () async {
+      _progressPhase.value = '正在引入并自动归类…';
+      final ok = await widget.fileLibrary.importDirectoryCopy(dir);
+      if (ok == 0) {
+        _toast('所选文件夹中没有可引入的文件');
+        return;
+      }
+      _progressPhase.value = '正在为文档建立分类笔记…';
+      final indexed = await _indexLibraryDocuments();
+      if (indexed == 0) {
+        _toast('已引入 $ok 个文件并按类型归类');
+        return;
+      }
+      _progressPhase.value = '正在生成笔记内容…';
+      final failed = await widget.library.generateAllEmpty();
+      _toast(
+        failed == 0 ? '已引入 $ok 个文件，生成 $indexed 篇笔记' : '笔记生成完成，$failed 篇失败',
+      );
+    });
   }
 
   Future<void> _scanFolder() async {
@@ -1167,6 +1306,14 @@ ${_clipContext(note.body, 12000)}
                         : '重新扫描',
                     style: const TextStyle(fontSize: 12.5),
                   ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: fileLib.working ? null : _importFolder,
+                  icon: const Icon(Icons.drive_folder_upload_outlined, size: 15),
+                  label: const Text('引入文件夹', style: TextStyle(fontSize: 12.5)),
                 ),
               ),
             ],

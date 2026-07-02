@@ -232,15 +232,26 @@ class FileLibraryService extends ChangeNotifier {
 
   /// 扫描文件夹：递归收集其中所有文件并移动进文件库归类，返回成功数量。
   Future<int> importFromDirectory(String sourceDir) async {
+    final paths = await _collectFiles(sourceDir);
+    return _ingest(paths, '整理文件夹', move: true);
+  }
+
+  /// 引入文件夹：递归收集其中所有文件并复制进文件库归类（保留源文件夹），返回成功数量。
+  Future<int> importDirectoryCopy(String sourceDir) async {
+    final paths = await _collectFiles(sourceDir);
+    return _ingest(paths, '引入文件夹', move: false);
+  }
+
+  Future<List<String>> _collectFiles(String sourceDir) async {
     final dir = Directory(sourceDir);
-    if (!await dir.exists()) return 0;
+    if (!await dir.exists()) return [];
     final paths = <String>[];
     await for (final entity in dir.list(recursive: true)) {
       if (entity is File && !entity.path.startsWith(rootDir)) {
         paths.add(entity.path);
       }
     }
-    return _ingest(paths, '整理文件夹', move: true);
+    return paths;
   }
 
   Future<int> _ingest(

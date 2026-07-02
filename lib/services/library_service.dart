@@ -513,6 +513,116 @@ ${refs.isEmpty ? '（无）' : refs.toString()}
     return out.isEmpty ? '主题研究报告' : out;
   }
 
+  /// 为文件库中尚未建立笔记的文档创建标准笔记：AI 按文件名归入分类，
+  /// 笔记带附件链接、正文为空模板（后续由批量生成补全内容）。返回新建数量。
+  Future<int> indexLibraryDocuments(List<LibraryFile> docs) async {
+    final pending = <LibraryFile>[];
+    for (final f in docs) {
+      final rel = p
+          .relative(f.path, from: settings.vaultPath)
+          .replaceAll('\\', '/');
+      final title = p.basenameWithoutExtension(f.name).trim();
+      final exists = notes.any(
+        (n) =>
+            n.fullTitle.trim() == title ||
+            n.body.contains(rel) ||
+            n.attachmentRelPath?.replaceAll('\\', '/') == rel,
+      );
+      if (!exists) pending.add(f);
+    }
+    if (pending.isEmpty) return 0;
+
+    var created = 0;
+    // 分批让 AI 归类，避免单次提示词过长。
+    const batchSize = 40;
+    for (var i = 0; i < pending.length; i += batchSize) {
+      final end = i + batchSize > pending.length
+          ? pending.length
+          : i + batchSize;
+      final batch = pending.sublist(i, end);
+      final mapping = await _classifyTitles(
+        batch.map((f) => p.basenameWithoutExtension(f.name).trim()).toList(),
+      );
+      for (final f in batch) {
+        final title = p.basenameWithoutExtension(f.name).trim();
+        final category = mapping[title];
+        if (category == null || category.isEmpty) continue;
+        await _writeFileNote(f, title, category);
+        created++;
+      }
+    }
+    if (created > 0) await reload();
+    return created;
+  }
+
+  Future<Map<String, String>> _classifyTitles(List<String> titles) async {
+    final existing = categories;
+    final prompt =
+        '''
+下面是知识库文件库中的文档文件名（每行一个）：
+${titles.map((t) => '- $t').join('\n')}
+
+知识库已有分类：${existing.isEmpty ? '（暂无）' : existing.join('、')}
+
+请为每份文档指定一个分类：优先从已有分类中选择语义匹配的；确实没有合适的才给出一个简短的新分类名（2-6 个字的主题词，不要用“其他”“未分类”这类含糊名称）。
+严格输出 JSON，不要输出其他文字，键为文档文件名（原样保留）、值为分类名：
+{"文件名A":"分类","文件名B":"分类"}
+''';
+    final content = await _chatRaw([
+      {'role': 'system', 'content': '你是知识管理专家，只输出 JSON。'},
+      {'role': 'user', 'content': prompt},
+    ], jsonMode: true);
+    final start = content.indexOf('{');
+    final end = content.lastIndexOf('}');
+    if (start < 0 || end <= start) throw Exception('模型未返回有效的分类结果');
+    final parsed = jsonDecode(content.substring(start, end + 1)) as Map;
+    final out = <String, String>{};
+    parsed.forEach((k, v) {
+      out[k.toString().trim()] = v.toString().trim();
+    });
+    return out;
+  }
+
+  Future<void> _writeFileNote(
+    LibraryFile f,
+    String title,
+    String category,
+  ) async {
+    final cat = _safeFileName(category);
+    final dir = Directory(p.join(notesDir, cat));
+    await dir.create(recursive: true);
+    final rel = p
+        .relative(f.path, from: settings.vaultPath)
+        .replaceAll('\\', '/');
+    final content =
+        '''
+---
+题名: "${title.replaceAll('"', '')}"
+类别: $cat
+来源: 文件库
+状态: 未读
+tags:
+  - $cat
+---
+
+## 原文
+
+[[$rel|打开原文]]
+
+## 适用范围
+
+## 核心要点
+
+## 相关标准
+
+## 我的笔记
+''';
+    final file = File(
+      _uniquePath(p.join(dir.path, '${_safeFileName(title)}.md')),
+    );
+    await file.writeAsString(content);
+  }
+
   /// 合并相同主题的分类：用 AI 将语义相同的分类归并到一个规范名下，
   /// 把对应笔记文件移动到规范分类目录并改写 frontmatter。返回移动的笔记数。
   Future<int> consolidateCategories() async {
