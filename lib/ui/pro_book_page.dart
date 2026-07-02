@@ -1263,8 +1263,23 @@ class _ProBookPageState extends State<ProBookPage> {
     );
   }
 
-  // 资料视图
+  // 资料视图：按章分组（全书通用 + 各章），每组可上传参考文件。
   Widget _referencesView(ProBookService svc, ProBook book) {
+    // 分组：'' = 全书通用，其余按章 id；保持大纲顺序。
+    final groups = <String, List<ProReference>>{'': []};
+    for (final c in book.chapters) {
+      groups[c.id] = [];
+    }
+    for (final r in book.references) {
+      (groups[r.chapterId] ?? groups['']!).add(r);
+    }
+    String groupTitle(String id) {
+      if (id.isEmpty) return '全书通用';
+      return book.chapters
+          .firstWhere((c) => c.id == id)
+          .title;
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1287,34 +1302,137 @@ class _ProBookPageState extends State<ProBookPage> {
                 icon: const Icon(Icons.auto_awesome, size: 15),
                 label: const Text('AI 建议'),
               ),
+              TextButton.icon(
+                onPressed: (svc.busy || book.references.isEmpty)
+                    ? null
+                    : () => _runFill(svc, svc.fetchAndDigestAll),
+                icon: const Icon(Icons.download_for_offline_outlined, size: 15),
+                label: const Text('获取并解读全部'),
+              ),
             ],
           ),
         ),
         Expanded(
-          child: book.references.isEmpty
+          child: book.references.isEmpty && book.chapters.isEmpty
               ? const Center(
                   child: Text(
                     '暂无资料。点击「AI 建议」或「手动添加」。',
                     style: TextStyle(fontSize: 12.5, color: _muted),
                   ),
                 )
-              : ListView.separated(
+              : ListView(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                  itemCount: book.references.length,
-                  separatorBuilder: (_, _) => const SizedBox(height: 8),
-                  itemBuilder: (context, i) =>
-                      _referenceRow(svc, book.references[i]),
+                  children: [
+                    for (final entry in groups.entries)
+                      // 全书通用组常显（作为上传入口）；章组只有有资料时才显示，
+                      // 上传时可在弹窗里选章。
+                      if (entry.key.isEmpty || entry.value.isNotEmpty)
+                        _referenceGroup(
+                          svc,
+                          entry.key,
+                          groupTitle(entry.key),
+                          entry.value,
+                        ),
+                  ],
                 ),
         ),
       ],
     );
   }
 
+  Widget _referenceGroup(
+    ProBookService svc,
+    String chapterId,
+    String title,
+    List<ProReference> refs,
+  ) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(0, 12, 0, 6),
+          child: Row(
+            children: [
+              Icon(
+                chapterId.isEmpty
+                    ? Icons.public_outlined
+                    : Icons.bookmark_border,
+                size: 15,
+                color: _accent,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  '$title（${refs.length}）',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: _ink,
+                  ),
+                ),
+              ),
+              TextButton.icon(
+                onPressed: svc.busy
+                    ? null
+                    : () => _uploadReferences(svc, chapterId),
+                icon: const Icon(Icons.upload_file_outlined, size: 14),
+                label: const Text(
+                  '上传参考',
+                  style: TextStyle(fontSize: 11.5),
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (refs.isEmpty)
+          const Padding(
+            padding: EdgeInsets.only(left: 21, bottom: 4),
+            child: Text(
+              '可上传该模块的参考文件（标准 PDF、模拟样题、系统截图等），AI 会自动解读供写作引用。',
+              style: TextStyle(fontSize: 11.5, color: _muted),
+            ),
+          )
+        else
+          for (final ref in refs)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: _referenceRow(svc, ref),
+            ),
+      ],
+    );
+  }
+
+  /// 分模块上传参考文件：支持文档与图片，AI 自动解读。
+  Future<void> _uploadReferences(ProBookService svc, String chapterId) async {
+    final res = await FilePicker.pickFiles(
+      allowMultiple: true,
+      type: FileType.custom,
+      allowedExtensions: [
+        'pdf', 'md', 'txt', 'html', 'htm', 'json', 'csv',
+        'jpg', 'jpeg', 'png', 'webp', 'bmp', 'gif',
+      ],
+    );
+    final paths =
+        res?.files.map((f) => f.path).whereType<String>().toList() ?? [];
+    if (paths.isEmpty) return;
+    await svc.uploadReferenceFiles(paths, chapterId: chapterId);
+    if (mounted) _toast(svc.stage);
+  }
+
+  Color _statusColor(ProRefStatus s) => switch (s) {
+    ProRefStatus.pending => _muted,
+    ProRefStatus.fetched => const Color(0xFF2563EB),
+    ProRefStatus.digested => _accent,
+  };
+
   Widget _referenceRow(ProBookService svc, ProReference ref) {
+    final statusColor = _statusColor(ref.status);
     return Container(
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: ref.enabled ? Colors.white : const Color(0xFFF5F5F7),
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: const Color(0xFFECECEE)),
       ),
@@ -1322,6 +1440,22 @@ class _ProBookPageState extends State<ProBookPage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _chip(ref.source),
+          const SizedBox(width: 6),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+            decoration: BoxDecoration(
+              color: statusColor.withValues(alpha: .1),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text(
+              ref.status.label,
+              style: TextStyle(
+                fontSize: 11,
+                color: statusColor,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
           const SizedBox(width: 8),
           Expanded(
             child: Column(
@@ -1345,6 +1479,24 @@ class _ProBookPageState extends State<ProBookPage> {
               ],
             ),
           ),
+          if (ref.hasDigest)
+            IconButton(
+              tooltip: '查看 AI 解读',
+              visualDensity: VisualDensity.compact,
+              iconSize: 15,
+              onPressed: () => _showDigest(ref),
+              icon: const Icon(Icons.description_outlined, color: _accent),
+            )
+          else
+            IconButton(
+              tooltip: ref.hasFile ? 'AI 解读原文' : '获取原文并解读',
+              visualDensity: VisualDensity.compact,
+              iconSize: 15,
+              onPressed: svc.busy
+                  ? null
+                  : () => _runFill(svc, () => svc.fetchAndDigestOne(ref)),
+              icon: const Icon(Icons.download_outlined, color: _muted),
+            ),
           IconButton(
             tooltip: '编辑',
             visualDensity: VisualDensity.compact,
@@ -1359,16 +1511,64 @@ class _ProBookPageState extends State<ProBookPage> {
             onPressed: () => svc.removeReference(ref),
             icon: const Icon(Icons.close, color: _muted),
           ),
+          // 是否参与成文：关闭后写作时不注入这条资料。
+          SizedBox(
+            height: 26,
+            child: FittedBox(
+              fit: BoxFit.contain,
+              child: Switch(
+                value: ref.enabled,
+                activeThumbColor: _accent,
+                onChanged: (v) => svc.toggleReference(ref, v),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showDigest(ProReference ref) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(
+          ref.title,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontSize: 15),
+        ),
+        content: SizedBox(
+          width: 560,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 460),
+            child: SingleChildScrollView(
+              child: MarkdownBody(data: ref.digest),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('关闭'),
+          ),
         ],
       ),
     );
   }
 
   Future<void> _editReference(ProBookService svc, ProReference ref) async {
+    final book = svc.current;
     final title = TextEditingController(text: ref.title);
     final note = TextEditingController(text: ref.note);
     final url = TextEditingController(text: ref.url);
     var source = ref.source;
+    var chapterId = ref.chapterId;
+    // 章下拉的合法性：大纲重生成后旧章 id 可能失效，归到全书通用。
+    if (chapterId.isNotEmpty &&
+        !(book?.chapters.any((c) => c.id == chapterId) ?? false)) {
+      chapterId = '';
+    }
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -1376,29 +1576,62 @@ class _ProBookPageState extends State<ProBookPage> {
           title: const Text('编辑资料'),
           content: SizedBox(
             width: 480,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _field(title, '资料名称', '标准 / 著作 / 文档名称'),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    const Text('来源：', style: TextStyle(fontSize: 12.5)),
-                    const SizedBox(width: 8),
-                    for (final s in const ['知识库', '网页', '手动'])
-                      Padding(
-                        padding: const EdgeInsets.only(right: 6),
-                        child: ChoiceChip(
-                          label: Text(s),
-                          selected: source == s,
-                          onSelected: (_) => setLocal(() => source = s),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _field(title, '资料名称', '标准 / 著作 / 文档名称'),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      const Text('来源：', style: TextStyle(fontSize: 12.5)),
+                      const SizedBox(width: 8),
+                      for (final s in const ['知识库', '网页', '上传', '手动'])
+                        Padding(
+                          padding: const EdgeInsets.only(right: 6),
+                          child: ChoiceChip(
+                            label: Text(s),
+                            selected: source == s,
+                            onSelected: (_) => setLocal(() => source = s),
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      const Text('关联模块：', style: TextStyle(fontSize: 12.5)),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: DropdownButton<String>(
+                          value: chapterId,
+                          isExpanded: true,
+                          style: const TextStyle(fontSize: 12.5, color: _ink),
+                          items: [
+                            const DropdownMenuItem(
+                              value: '',
+                              child: Text('全书通用'),
+                            ),
+                            for (final c in book?.chapters ?? const <ProChapter>[])
+                              DropdownMenuItem(
+                                value: c.id,
+                                child: Text(
+                                  c.title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                          ],
+                          onChanged: (v) => setLocal(() => chapterId = v ?? ''),
                         ),
                       ),
-                  ],
-                ),
-                _field(note, '用途说明', '支撑哪部分内容', maxLines: 2),
-                _field(url, '链接（可选）', 'https://…'),
-              ],
+                    ],
+                  ),
+                  _field(note, '用途说明', '支撑哪部分内容', maxLines: 2),
+                  _field(url, '链接（可选）', 'https://…'),
+                ],
+              ),
             ),
           ),
           actions: [
@@ -1420,6 +1653,7 @@ class _ProBookPageState extends State<ProBookPage> {
       ref.note = note.text.trim();
       ref.url = url.text.trim();
       ref.source = source;
+      ref.chapterId = chapterId;
       await svc.save();
     }
   }

@@ -8,8 +8,16 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:pdfrx/pdfrx.dart';
 
+import '../models.dart';
+import 'agent/memory/memory_selector.dart';
+import 'agent/memory/memory_store.dart';
+import 'agent/memory/memory_types.dart';
+import 'agent/model_client.dart';
+import 'file_library_service.dart';
 import 'latex_pdf.dart';
+import 'library_service.dart';
 import 'settings_service.dart';
+import 'web_reader.dart';
 
 /// 专业书籍面向的行业。决定提示词里的术语、结构和合规重点。
 enum ProIndustry {
@@ -80,7 +88,26 @@ class ProTerm {
   );
 }
 
-/// 参考资料/引用。source 标明来源：知识库 / 网页 / 手动。
+/// 参考资料状态：原文是否已拿到、是否已由 AI 解读。
+enum ProRefStatus {
+  pending,
+  fetched,
+  digested;
+
+  String get label => switch (this) {
+    ProRefStatus.pending => '待获取',
+    ProRefStatus.fetched => '已入库',
+    ProRefStatus.digested => '已解读',
+  };
+
+  static ProRefStatus fromName(String? v) => switch (v) {
+    'fetched' => ProRefStatus.fetched,
+    'digested' => ProRefStatus.digested,
+    _ => ProRefStatus.pending,
+  };
+}
+
+/// 参考资料/引用。source 标明来源：知识库 / 网页 / 上传 / 手动。
 class ProReference {
   ProReference({
     required this.id,
@@ -89,16 +116,34 @@ class ProReference {
     this.note = '',
     this.url = '',
     this.enabled = true,
+    this.chapterId = '',
+    this.filePath = '',
+    this.digest = '',
+    this.status = ProRefStatus.pending,
   });
 
   final String id;
   String title;
 
-  /// 来源类型：知识库 / 网页 / 手动。
+  /// 来源类型：知识库 / 网页 / 上传 / 手动。
   String source;
   String note;
   String url;
   bool enabled;
+
+  /// 关联的章 id（空 = 全书通用），实现"按写作模块分组"。
+  String chapterId;
+
+  /// 原文文件的绝对路径或相对知识库根的路径（入库/上传后回填）。
+  String filePath;
+
+  /// AI 解读：适用范围、核心要点、可引用的关键条款（成文时注入）。
+  String digest;
+
+  ProRefStatus status;
+
+  bool get hasFile => filePath.trim().isNotEmpty;
+  bool get hasDigest => digest.trim().isNotEmpty;
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -107,6 +152,10 @@ class ProReference {
     'note': note,
     'url': url,
     'enabled': enabled,
+    'chapterId': chapterId,
+    'filePath': filePath,
+    'digest': digest,
+    'status': status.name,
   };
 
   factory ProReference.fromJson(Map<String, dynamic> j) => ProReference(
@@ -116,6 +165,10 @@ class ProReference {
     note: j['note'] as String? ?? '',
     url: j['url'] as String? ?? '',
     enabled: j['enabled'] as bool? ?? true,
+    chapterId: j['chapterId'] as String? ?? '',
+    filePath: j['filePath'] as String? ?? '',
+    digest: j['digest'] as String? ?? '',
+    status: ProRefStatus.fromName(j['status'] as String?),
   );
 }
 
@@ -126,6 +179,7 @@ class ProSection {
     required this.title,
     this.brief = '',
     this.content = '',
+    this.recap = '',
   });
 
   final String id;
@@ -134,6 +188,9 @@ class ProSection {
   /// 本节写作要点（来自大纲，指导成文）。
   String brief;
   String content;
+
+  /// 本节写完后的纪要（约 120 字），供后续节滚动上下文防重复。
+  String recap;
 
   bool get hasContent => content.trim().isNotEmpty;
 
@@ -145,6 +202,7 @@ class ProSection {
     'title': title,
     'brief': brief,
     'content': content,
+    'recap': recap,
   };
 
   factory ProSection.fromJson(Map<String, dynamic> j) => ProSection(
@@ -152,6 +210,7 @@ class ProSection {
     title: j['title'] as String? ?? '',
     brief: j['brief'] as String? ?? '',
     content: j['content'] as String? ?? '',
+    recap: j['recap'] as String? ?? '',
   );
 }
 
@@ -204,6 +263,7 @@ class ProBook {
     this.reviewNotes = '',
     this.referenceName = '',
     this.referenceMaterial = '',
+    this.bookState = '',
     List<ProChapter>? chapters,
     List<ProReference>? references,
     List<ProTerm>? glossary,
@@ -236,6 +296,10 @@ class ProBook {
   List<ProTerm> glossary;
   String reviewNotes;
 
+  /// 写作台账（滚动摘要）：已覆盖的主题、术语口径、已引用的标准/资料、
+  /// 与后文的衔接点。每写完一节更新，写下一节时注入，保证全书上下文连贯。
+  String bookState;
+
   final DateTime createdAt;
   DateTime updatedAt;
 
@@ -257,6 +321,7 @@ class ProBook {
     'reviewNotes': reviewNotes,
     'referenceName': referenceName,
     'referenceMaterial': referenceMaterial,
+    'bookState': bookState,
     'chapters': chapters.map((c) => c.toJson()).toList(),
     'references': references.map((r) => r.toJson()).toList(),
     'glossary': glossary.map((g) => g.toJson()).toList(),
@@ -276,6 +341,7 @@ class ProBook {
     reviewNotes: j['reviewNotes'] as String? ?? '',
     referenceName: j['referenceName'] as String? ?? '',
     referenceMaterial: j['referenceMaterial'] as String? ?? '',
+    bookState: j['bookState'] as String? ?? '',
     chapters: ((j['chapters'] as List?) ?? [])
         .whereType<Map>()
         .map((e) => ProChapter.fromJson(e.cast<String, dynamic>()))
@@ -317,9 +383,15 @@ class ProPlaceholder {
 ///
 /// 按「科技 / 档案」行业套用不同提示词，保证内容贴合行业最佳实践。
 class ProBookService extends ChangeNotifier {
-  ProBookService(this.settings);
+  ProBookService(this.settings, {this.library, this.fileLibrary});
 
   final SettingsService settings;
+
+  /// 知识库（标准笔记）：资料建议时匹配已有笔记。可为空（如移动端未接线）。
+  final LibraryService? library;
+
+  /// 文件库：下载的原文入库归类。可为空。
+  final FileLibraryService? fileLibrary;
 
   final List<ProBook> books = [];
   ProBook? current;
@@ -330,11 +402,28 @@ class ProBookService extends ChangeNotifier {
 
   bool _cancel = false;
   File? _store;
+  String _baseDir = '';
   Directory? _imageDir; // 补充图表生成/上传的图片存放目录
   http.Client? _client;
 
+  final WebReader _webReader = WebReader();
+
+  /// 小模型通道：记忆召回选择、纪要归纳等廉价任务。
+  late final ModelClient _small = ModelClient(settings, role: ModelRole.small);
+  late final MemorySelector _selector = MemorySelector(_small);
+
+  /// 每本书一个「知识记忆库」（已确立的标准条款/术语/关键事实），
+  /// 落在应用数据目录，不污染知识库。
+  MemoryStore _canon(ProBook book) =>
+      MemoryStore(p.join(_baseDir, 'pro_book_data', book.id, 'memory'));
+
+  /// 每本书的上传参考文件目录（模拟样题、系统截图等）。
+  Directory _refsDir(ProBook book) =>
+      Directory(p.join(_baseDir, 'pro_book_data', book.id, 'refs'));
+
   Future<void> init() async {
     final dir = await getApplicationSupportDirectory();
+    _baseDir = dir.path;
     _store = File('${dir.path}\\pro_books.json');
     if (await _store!.exists()) {
       try {
@@ -450,6 +539,11 @@ class ProBookService extends ChangeNotifier {
     }
     notifyListeners();
     await _persist();
+    // 一并清理该书的记忆库与上传参考文件目录。
+    try {
+      final dir = Directory(p.join(_baseDir, 'pro_book_data', book.id));
+      if (await dir.exists()) await dir.delete(recursive: true);
+    } catch (_) {}
   }
 
   Future<void> save() async {
@@ -675,6 +769,9 @@ ${book.industry.guidance}
     if (book == null || busy) return;
     _begin('正在梳理应参考的资料 / 标准 / 法规…');
     try {
+      final chapterList = book.chapters.isEmpty
+          ? '（暂无大纲）'
+          : book.chapters.map((c) => '- ${c.title}').join('\n');
       final reply = await _chat([
         {
           'role': 'system',
@@ -697,31 +794,45 @@ ${_outlineText(book)}
 - ${book.industry == ProIndustry.archive ? '优先列出相关国家标准(GB/T)、行业标准(DA/T)与法律法规；不确定的编号留空或注明“待核实”，绝不可编造。' : '优先列出权威著作、标准规范、经典论文与官方文档。'}
 - source 字段取值只能是：知识库 / 网页 / 手动。建议优先“网页”或“知识库”。
 - note 写清这条资料对应支撑哪部分内容。
+- chapter 字段：从下面章标题中选出这条资料主要支撑的一章（原样抄写标题）；若支撑全书则留空字符串。
+章标题列表：
+$chapterList
 
 严格输出 JSON：
-{"references":[{"title":"资料名称","source":"网页","note":"用途说明","url":""}]}
+{"references":[{"title":"资料名称","source":"网页","note":"用途说明","url":"","chapter":""}]}
 ''',
         },
       ], jsonMode: true);
       final j = _parseJson(reply);
       final raw = (j['references'] as List?) ?? [];
       var added = 0;
+      final newRefs = <ProReference>[];
       for (final r in raw.whereType<Map>()) {
         final title = (r['title'] ?? '').toString().trim();
         if (title.isEmpty) continue;
-        book.references.add(
-          ProReference(
-            id: '${DateTime.now().microsecondsSinceEpoch}_$added',
-            title: title,
-            source: _normalizeSource((r['source'] ?? '手动').toString()),
-            note: (r['note'] ?? '').toString().trim(),
-            url: (r['url'] ?? '').toString().trim(),
-          ),
+        // 跳过与已有资料同名的建议，避免反复点击时堆积重复条目。
+        if (book.references.any((e) => e.title.trim() == title)) continue;
+        final ref = ProReference(
+          id: '${DateTime.now().microsecondsSinceEpoch}_$added',
+          title: title,
+          source: _normalizeSource((r['source'] ?? '手动').toString()),
+          note: (r['note'] ?? '').toString().trim(),
+          url: (r['url'] ?? '').toString().trim(),
+          chapterId: _chapterIdByTitle(book, (r['chapter'] ?? '').toString()),
         );
+        book.references.add(ref);
+        newRefs.add(ref);
         added++;
       }
+      // 自动匹配知识库：命中的资料直接关联原文，免下载。
+      var matched = 0;
+      for (final ref in newRefs) {
+        if (_matchLibrary(ref)) matched++;
+      }
       book.updatedAt = DateTime.now();
-      stage = added == 0 ? '未获得资料建议' : '已补充 $added 条参考资料建议';
+      stage = added == 0
+          ? '未获得资料建议'
+          : '已补充 $added 条参考资料建议${matched > 0 ? '（$matched 条在知识库中找到原文）' : ''}';
       await _persist();
     } catch (e) {
       stage = _cancel ? '已停止' : '资料建议失败：$e';
@@ -730,7 +841,346 @@ ${_outlineText(book)}
     }
   }
 
-  void addReference({String title = '', String source = '手动'}) {
+  /// 按章标题找章 id；找不到返回空（全书通用）。
+  String _chapterIdByTitle(ProBook book, String title) {
+    final t = title.replaceAll(RegExp(r'\s'), '');
+    if (t.isEmpty) return '';
+    for (final c in book.chapters) {
+      final ct = c.title.replaceAll(RegExp(r'\s'), '');
+      if (ct == t || ct.contains(t) || t.contains(ct)) return c.id;
+    }
+    return '';
+  }
+
+  /// 在知识库（标准笔记 + 文件库）中按标题模糊匹配这条资料的原文。
+  /// 命中则回填 filePath / source / status，返回 true。
+  bool _matchLibrary(ProReference ref) {
+    if (ref.hasFile) return true;
+    final key = _matchKey(ref.title);
+    if (key.isEmpty) return false;
+    // 先找文件库里的原文文件（可全文解读）。
+    for (final f in fileLibrary?.files ?? const <LibraryFile>[]) {
+      final name = _matchKey(p.basenameWithoutExtension(f.name));
+      if (name.isEmpty) continue;
+      if (name.contains(key) || key.contains(name)) {
+        ref.filePath = f.path;
+        ref.source = '知识库';
+        ref.status = ProRefStatus.fetched;
+        return true;
+      }
+    }
+    // 再找标准笔记：笔记正文本身可作为解读来源。
+    for (final n in library?.notes ?? const <StandardNote>[]) {
+      final t = _matchKey(n.fullTitle);
+      if (t.isEmpty) continue;
+      if (t.contains(key) || key.contains(t)) {
+        ref.filePath = n.filePath;
+        ref.source = '知识库';
+        ref.status = ProRefStatus.fetched;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// 匹配用的规范化键：去空白与标点，保留中英文与数字（标准编号可对上）。
+  static String _matchKey(String s) => s
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^\w\u4e00-\u9fa5]'), '')
+      .trim();
+
+  /// 获取一条资料的原文：先匹配知识库；有 url 的下载入文件库。
+  /// 成功返回 true 并回填 filePath / status。
+  Future<bool> fetchReference(ProReference ref) async {
+    if (ref.hasFile) return true;
+    if (_matchLibrary(ref)) {
+      notifyListeners();
+      await _persist();
+      return true;
+    }
+    final url = ref.url.trim();
+    if (url.isEmpty) return false;
+    final fl = fileLibrary;
+    if (fl == null) return false;
+    // PDF 直链优先按字节下载；其余网页走 Jina Reader 转 Markdown 保存。
+    if (url.toLowerCase().contains('.pdf')) {
+      final bytes = await _downloadBytes(url);
+      if (bytes != null && _looksLikePdf(bytes)) {
+        final rel = await fl.saveDownloaded('${_sanitize(ref.title)}.pdf', bytes);
+        ref.filePath = p.join(settings.vaultPath, rel);
+        ref.status = ProRefStatus.fetched;
+        notifyListeners();
+        await _persist();
+        return true;
+      }
+    }
+    final md = await _webReader.readMarkdown(url);
+    if (md == null || md.trim().isEmpty) return false;
+    final rel = await fl.saveDownloaded(
+      '${_sanitize(ref.title)}.md',
+      Uint8List.fromList(utf8.encode(md)),
+    );
+    ref.filePath = p.join(settings.vaultPath, rel);
+    ref.status = ProRefStatus.fetched;
+    notifyListeners();
+    await _persist();
+    return true;
+  }
+
+  Future<Uint8List?> _downloadBytes(String url) async {
+    final client = _client = http.Client();
+    try {
+      final resp = await client
+          .get(
+            Uri.parse(url),
+            headers: {'User-Agent': WebReader.userAgent, 'Accept': '*/*'},
+          )
+          .timeout(const Duration(seconds: 40));
+      if (resp.statusCode != 200) return null;
+      return resp.bodyBytes.length < 1024 ? null : resp.bodyBytes;
+    } catch (_) {
+      return null;
+    } finally {
+      client.close();
+      if (identical(_client, client)) _client = null;
+    }
+  }
+
+  static bool _looksLikePdf(Uint8List bytes) {
+    final limit = bytes.length < 1024 ? bytes.length - 3 : 1024;
+    for (var i = 0; i < limit; i++) {
+      if (bytes[i] == 0x25 &&
+          bytes[i + 1] == 0x50 &&
+          bytes[i + 2] == 0x44 &&
+          bytes[i + 3] == 0x46) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static const _refImageExt = {'jpg', 'jpeg', 'png', 'webp', 'bmp', 'gif'};
+
+  static bool _isImagePath(String path) =>
+      _refImageExt.contains(p.extension(path).replaceFirst('.', '').toLowerCase());
+
+  /// 把 filePath 解析为绝对路径（下载入库时存的是相对知识库根的路径）。
+  String _resolveRefPath(ProReference ref) {
+    final fp = ref.filePath.trim();
+    if (fp.isEmpty) return '';
+    if (p.isAbsolute(fp)) return fp;
+    return p.joinAll([settings.vaultPath, ...fp.split(RegExp(r'[\\/]'))]);
+  }
+
+  /// 解读一条已有原文的资料：抽取正文（图片走 vision 读图），
+  /// 生成「适用范围 / 核心要点 / 可引用条款」解读，供成文注入。
+  Future<void> digestReference(ProReference ref) async {
+    final book = current;
+    if (book == null) return;
+    final path = _resolveRefPath(ref);
+    if (path.isEmpty || !await File(path).exists()) {
+      throw Exception('原文文件不存在，请先获取原文');
+    }
+    final digestUser =
+        '''
+这是为专业书《${book.title}》（${book.industry.label}行业，${book.bookType.label}）收集的参考资料。
+资料名称：${ref.title}
+用途说明：${ref.note.isEmpty ? '（未填写）' : ref.note}
+
+请解读这份资料，输出简洁的 Markdown（总长不超过 600 字），结构：
+## 适用范围
+（这份资料规定/阐述了什么、适用于什么场景，2-3 句）
+## 核心要点
+（列出写书时最可能引用的 4-8 条关键内容；标准类资料给出准确的条款要点与编号；样题类归纳题型与考点；截图类描述界面与操作流程）
+## 引用口径
+（写作引用它时应使用的准确名称/编号/版本，避免误引）
+
+只依据资料本身，不要编造。''';
+    String digest;
+    if (_isImagePath(path)) {
+      final bytes = await File(path).readAsBytes();
+      final ext = p.extension(path).replaceFirst('.', '').toLowerCase();
+      final mime = ext == 'png' ? 'image/png' : 'image/jpeg';
+      digest = await _chat([
+        {
+          'role': 'user',
+          'content': [
+            {'type': 'text', 'text': digestUser},
+            {
+              'type': 'image_url',
+              'image_url': {'url': 'data:$mime;base64,${base64Encode(bytes)}'},
+            },
+          ],
+        },
+      ], role: ModelRole.vision);
+    } else {
+      final text = await _refText(path);
+      if (text.trim().isEmpty) {
+        throw Exception('未能从原文中提取到文字（可能是扫描件或不支持的格式）');
+      }
+      digest = await _chat([
+        {'role': 'system', 'content': '你是严谨的专业资料解读编辑。只输出 Markdown 正文，不要解释。'},
+        {'role': 'user', 'content': '$digestUser\n\n资料正文：\n${_clip(text, 14000)}'},
+      ]);
+    }
+    if (digest.trim().isEmpty) throw Exception('模型未返回解读');
+    ref.digest = digest.trim();
+    ref.status = ProRefStatus.digested;
+    book.updatedAt = DateTime.now();
+    notifyListeners();
+    await _persist();
+  }
+
+  /// 从资料原文文件中抽取文本。支持 pdf / md / txt / html。
+  Future<String> _refText(String path) async {
+    final ext = p.extension(path).replaceFirst('.', '').toLowerCase();
+    if (ext == 'pdf') {
+      return _pdfText(await File(path).readAsBytes());
+    }
+    if (const {'md', 'markdown', 'txt', 'json', 'csv'}.contains(ext)) {
+      return File(path).readAsString();
+    }
+    if (const {'html', 'htm'}.contains(ext)) {
+      final raw = await File(path).readAsString();
+      // 粗略去标签取正文。
+      return raw
+          .replaceAll(RegExp(r'<script[\s\S]*?</script>', caseSensitive: false), '')
+          .replaceAll(RegExp(r'<style[\s\S]*?</style>', caseSensitive: false), '')
+          .replaceAll(RegExp(r'<[^>]+>'), ' ')
+          .replaceAll(RegExp(r'\s+'), ' ')
+          .trim();
+    }
+    return '';
+  }
+
+  /// 批量：对所有启用的资料，逐条获取原文并解读。
+  Future<void> fetchAndDigestAll() async {
+    final book = current;
+    if (book == null || busy) return;
+    final targets = book.references
+        .where((r) => r.enabled && r.title.trim().isNotEmpty)
+        .toList();
+    if (targets.isEmpty) {
+      stage = '没有可处理的资料';
+      notifyListeners();
+      return;
+    }
+    _begin('正在获取并解读资料…');
+    try {
+      var fetched = 0, digested = 0, failed = 0;
+      for (var i = 0; i < targets.length; i++) {
+        if (_cancel) break;
+        final ref = targets[i];
+        stage = '（${i + 1}/${targets.length}）${ref.title}';
+        notifyListeners();
+        try {
+          if (!ref.hasFile) {
+            if (await fetchReference(ref)) fetched++;
+          }
+          if (ref.hasFile && !ref.hasDigest) {
+            await digestReference(ref);
+            digested++;
+          }
+          if (!ref.hasFile) failed++;
+        } catch (_) {
+          failed++;
+        }
+      }
+      stage = _cancel
+          ? '已停止'
+          : '完成：新获取 $fetched 份原文，解读 $digested 份'
+              '${failed > 0 ? '，$failed 份未能获取（可编辑补充链接后重试）' : ''}';
+      await _persist();
+    } catch (e) {
+      stage = _cancel ? '已停止' : '获取解读失败：$e';
+    } finally {
+      _end();
+    }
+  }
+
+  /// 单条「获取原文 + 解读」，供资料行上的按钮调用。
+  Future<void> fetchAndDigestOne(ProReference ref) async {
+    if (current == null || busy) return;
+    _begin('正在处理：${ref.title}…');
+    try {
+      if (!ref.hasFile && !await fetchReference(ref)) {
+        stage = '未能获取原文：请在知识库引入该资料，或编辑资料补充链接';
+        return;
+      }
+      await digestReference(ref);
+      stage = '已解读：${ref.title}';
+    } catch (e) {
+      stage = _cancel ? '已停止' : '解读失败：$e';
+    } finally {
+      _end();
+    }
+  }
+
+  /// 分模块上传参考文件（模拟样题、系统截图等）：
+  /// 复制到本书私有 refs 目录，登记为「上传」资料并自动解读。
+  Future<void> uploadReferenceFiles(
+    List<String> paths, {
+    String chapterId = '',
+  }) async {
+    final book = current;
+    if (book == null || busy || paths.isEmpty) return;
+    _begin('正在导入参考文件…');
+    try {
+      final dir = _refsDir(book);
+      await dir.create(recursive: true);
+      final added = <ProReference>[];
+      for (final src in paths) {
+        final name = p.basename(src);
+        var dest = p.join(dir.path, name);
+        if (await File(dest).exists()) {
+          dest = p.join(
+            dir.path,
+            '${p.basenameWithoutExtension(name)}'
+            '_${DateTime.now().millisecondsSinceEpoch}${p.extension(name)}',
+          );
+        }
+        await File(src).copy(dest);
+        final ref = ProReference(
+          id: '${DateTime.now().microsecondsSinceEpoch}_${added.length}',
+          title: p.basenameWithoutExtension(name),
+          source: '上传',
+          chapterId: chapterId,
+          filePath: dest,
+          status: ProRefStatus.fetched,
+        );
+        book.references.add(ref);
+        added.add(ref);
+      }
+      book.updatedAt = DateTime.now();
+      notifyListeners();
+      await _persist();
+      // 逐份解读（失败不阻断其余文件）。
+      var digested = 0;
+      for (var i = 0; i < added.length; i++) {
+        if (_cancel) break;
+        stage = '正在解读（${i + 1}/${added.length}）：${added[i].title}…';
+        notifyListeners();
+        try {
+          await digestReference(added[i]);
+          digested++;
+        } catch (_) {}
+      }
+      stage = _cancel
+          ? '已停止'
+          : '已上传 ${added.length} 份参考，解读 $digested 份';
+      await _persist();
+    } catch (e) {
+      stage = _cancel ? '已停止' : '导入参考文件失败：$e';
+    } finally {
+      _end();
+    }
+  }
+
+  void addReference({
+    String title = '',
+    String source = '手动',
+    String chapterId = '',
+  }) {
     final book = current;
     if (book == null) return;
     book.references.add(
@@ -738,6 +1188,7 @@ ${_outlineText(book)}
         id: DateTime.now().microsecondsSinceEpoch.toString(),
         title: title,
         source: _normalizeSource(source),
+        chapterId: chapterId,
       ),
     );
     book.updatedAt = DateTime.now();
@@ -747,6 +1198,26 @@ ${_outlineText(book)}
 
   void removeReference(ProReference ref) {
     current?.references.remove(ref);
+    current?.updatedAt = DateTime.now();
+    // 上传到本书私有目录的文件一并删除。
+    if (ref.source == '上传' && ref.filePath.isNotEmpty) {
+      try {
+        File(ref.filePath).deleteSync();
+      } catch (_) {}
+    }
+    notifyListeners();
+    _persist();
+  }
+
+  void toggleReference(ProReference ref, bool enabled) {
+    ref.enabled = enabled;
+    current?.updatedAt = DateTime.now();
+    notifyListeners();
+    _persist();
+  }
+
+  void setReferenceChapter(ProReference ref, String chapterId) {
+    ref.chapterId = chapterId;
     current?.updatedAt = DateTime.now();
     notifyListeners();
     _persist();
@@ -779,6 +1250,9 @@ ${_outlineText(book)}
           section.content = await _streamSection(book, chapter, section);
           book.updatedAt = DateTime.now();
           await _persist();
+          if (section.hasContent && !_cancel) {
+            await _consolidate(book, chapter, section);
+          }
         }
         if (_cancel) break;
       }
@@ -802,6 +1276,10 @@ ${_outlineText(book)}
       section.content = '';
       section.content = await _streamSection(book, chapter, section);
       book.updatedAt = DateTime.now();
+      await _persist();
+      if (section.hasContent && !_cancel) {
+        await _consolidate(book, chapter, section);
+      }
       stage = _cancel ? '已停止' : '本节已完成';
       await _persist();
     } catch (e) {
@@ -816,6 +1294,8 @@ ${_outlineText(book)}
     ProChapter chapter,
     ProSection section,
   ) async {
+    // 写前从本书知识记忆库召回与本节相关的已确立事实（标准条款/术语/口径）。
+    final canon = await _recallCanon(book, chapter, section);
     var acc = '';
     await for (final delta in _streamChat([
       {
@@ -824,7 +1304,10 @@ ${_outlineText(book)}
             '你是资深「${book.industry.label}」行业专业作者，正在写一本${book.bookType.label}。'
                 '直接输出本小节的 Markdown 正文，不要解释、不要代码围栏、不要重复小节标题。',
       },
-      {'role': 'user', 'content': _sectionPrompt(book, chapter, section)},
+      {
+        'role': 'user',
+        'content': _sectionPrompt(book, chapter, section, canon),
+      },
     ])) {
       if (_cancel) break;
       acc += delta;
@@ -834,38 +1317,265 @@ ${_outlineText(book)}
     return acc.trim();
   }
 
-  String _sectionPrompt(ProBook book, ProChapter chapter, ProSection section) {
-    final refs = book.references.where((r) => r.enabled && r.title.isNotEmpty);
-    final refText = refs.isEmpty
-        ? '（暂无登记资料）'
-        : refs.map((r) => '- [${r.source}] ${r.title}｜${r.note}').join('\n');
+  /// 全书按大纲顺序展开的小节列表（滚动上下文用）。
+  static List<ProSection> _flatSections(ProBook book) => [
+    for (final c in book.chapters) ...c.sections,
+  ];
+
+  /// 当前节之前最近几节的纪要（防重复、保证承接）。
+  String _recentRecaps(ProBook book, ProSection section, {int take = 3}) {
+    final flat = _flatSections(book);
+    final idx = flat.indexOf(section);
+    if (idx <= 0) return '';
+    final buf = <String>[];
+    for (var i = idx - 1; i >= 0 && buf.length < take; i--) {
+      final s = flat[i];
+      if (s.recap.trim().isEmpty) continue;
+      buf.insert(0, '- ${s.title}：${s.recap.trim()}');
+    }
+    return buf.join('\n');
+  }
+
+  /// 上一个已写小节的结尾片段（自然衔接、避免换口气）。
+  String _prevSectionTail(ProBook book, ProSection section, {int chars = 600}) {
+    final flat = _flatSections(book);
+    final idx = flat.indexOf(section);
+    for (var i = idx - 1; i >= 0; i--) {
+      final content = flat[i].content.trim();
+      if (content.isEmpty) continue;
+      return content.length <= chars
+          ? content
+          : content.substring(content.length - chars);
+    }
+    return '';
+  }
+
+  /// 本章可用的参考资料：已解读的注入 digest 全文，未解读的仅列名称。
+  String _sectionRefsBlock(ProBook book, ProChapter chapter) {
+    final refs = book.references
+        .where(
+          (r) =>
+              r.enabled &&
+              r.title.trim().isNotEmpty &&
+              (r.chapterId.isEmpty || r.chapterId == chapter.id),
+        )
+        .toList();
+    if (refs.isEmpty) return '（暂无登记资料）';
+    final buf = StringBuffer();
+    for (final r in refs.where((e) => e.hasDigest)) {
+      buf
+        ..writeln('### ${r.title}（${r.source}${r.note.isEmpty ? '' : '｜${r.note}'}）')
+        ..writeln(_clip(r.digest.trim(), 1600))
+        ..writeln();
+    }
+    final undigested = refs.where((e) => !e.hasDigest).toList();
+    if (undigested.isNotEmpty) {
+      buf
+        ..writeln('（下列资料尚未解读，只知其名，引用需谨慎、不得虚构其内容）')
+        ..writeln(
+          undigested.map((r) => '- [${r.source}] ${r.title}｜${r.note}').join('\n'),
+        );
+    }
+    return buf.toString().trim();
+  }
+
+  String _sectionPrompt(
+    ProBook book,
+    ProChapter chapter,
+    ProSection section,
+    String canon,
+  ) {
     final glossary = book.glossary.isEmpty
         ? '（暂无术语表）'
         : book.glossary.map((t) => '- ${t.term}：${t.definition}').join('\n');
+    final recaps = _recentRecaps(book, section);
+    final prevTail = _prevSectionTail(book, section);
+    final refsBlock = _sectionRefsBlock(book, chapter);
     return '''
+你正在为《${book.title}》写「${section.title}」这一小节。
+
+== 全书定位 ==
 ${book.industry.guidance}
 书籍类型：${book.bookType.label}（${book.bookType.guidance}）
-书名：${book.title}
 读者定位：${book.readerPositioning}
 核心价值：${book.valueProposition}
 
+== 写作台账（已写内容概况，避免重复、保持口径一致）==
+${book.bookState.trim().isEmpty ? '（本节是全书最早写的内容之一）' : book.bookState.trim()}
+
+== 最近几节纪要 ==
+${recaps.isEmpty ? '（无）' : recaps}
+
+== 上一节结尾（衔接参考）==
+${prevTail.isEmpty ? '（无）' : prevTail}
+
+== 与本节相关的已确立事实（须保持一致，不得矛盾）==
+${canon.isEmpty ? '（无）' : canon}
+
+== 本章可用参考资料解读 ==
+$refsBlock
+
+== 所在章与本节 ==
 所在章：${chapter.title}（${chapter.brief}）
 当前要写的小节：${section.title}
 本节写作要点：${section.brief}
 
-可参考的资料/标准（务必依据这些，不要编造标准编号或数据）：
-$refText
-
-应保持一致的关键术语：
+== 应保持一致的关键术语 ==
 $glossary
 
 要求：
 - 内容专业、准确、可读，符合该行业规范与最佳实践。
+- 引用标准、法规、文献时，只使用上面「参考资料解读」和「已确立事实」中给出的准确名称、编号与条款；未出现过的编号一律不得编造，可用「相关标准」等泛称。
+- 不要重复前文已充分展开的内容；需要呼应时用一句话带过并写"（详见前文相关章节）"。
 - 与全书风格一致；术语用法与上面的术语表保持一致。
 - 凡是用图或表能让读者更易理解之处（如流程、结构、对比、参数、分类），**必须预留占位符**，单独成行，格式严格如下（不要伪造图片或编造数据）：
   - 图：`> 【待补充图】图题与应展示内容的说明`
   - 表：`> 【待补充表】表题与应包含的列/内容说明`
 - 只输出本小节正文，使用清晰的 Markdown。''';
+  }
+
+  // ---------------------------------------------------------------------------
+  // 写作连贯记忆（参照小说模块：常驻台账 + 结构化知识库 + 小模型按需召回）
+  // ---------------------------------------------------------------------------
+
+  /// 写本节前，用小模型从「知识记忆库」挑出与本节相关的已确立事实。
+  Future<String> _recallCanon(
+    ProBook book,
+    ProChapter chapter,
+    ProSection section,
+  ) async {
+    try {
+      final store = _canon(book);
+      final headers = await store.scanHeaders();
+      if (headers.isEmpty) return '';
+      final query = '${chapter.title} ${section.title}。${section.brief}';
+      final selected = await _selector.select(
+        query: query,
+        headers: headers,
+        manifest: store.formatManifest(headers),
+        maxResults: 8,
+      );
+      if (selected.isEmpty) return '';
+      final buf = StringBuffer();
+      for (final h in selected) {
+        final body = await store.readBody(h.filename);
+        if (body == null || body.trim().isEmpty) continue;
+        buf.writeln('- ${h.name}：${body.trim()}');
+      }
+      return buf.toString().trim();
+    } catch (_) {
+      // 召回失败不阻断写作。
+      return '';
+    }
+  }
+
+  /// 写完一节后：归纳本节纪要 → 更新写作台账 → 沉淀关键事实入记忆库。
+  Future<void> _consolidate(
+    ProBook book,
+    ProChapter chapter,
+    ProSection section,
+  ) async {
+    try {
+      stage = '归纳本节纪要…';
+      notifyListeners();
+      final recap = await _chat([
+        {'role': 'system', 'content': '你负责为专业书稿做连贯性归档。只输出简洁中文，不要解释。'},
+        {
+          'role': 'user',
+          'content':
+              '用120字以内客观概述本节写了什么（覆盖的主题、引用的标准/资料、'
+              '给出的关键结论或方法），供后续小节避免重复、保持衔接。只输出概述：\n\n${section.content}',
+        },
+      ], role: ModelRole.small);
+      if (recap.trim().isNotEmpty) section.recap = recap.trim();
+
+      stage = '更新写作台账…';
+      notifyListeners();
+      final state = await _chat([
+        {
+          'role': 'system',
+          'content': '你在维护一本专业书的"写作台账"，用于保证后续小节口径一致、不重复、不遗漏。',
+        },
+        {'role': 'user', 'content': _stateUpdatePrompt(book, chapter, section)},
+      ]);
+      if (state.trim().isNotEmpty) book.bookState = state.trim();
+
+      stage = '沉淀关键事实到记忆库…';
+      notifyListeners();
+      await _extractCanon(book, section);
+
+      book.updatedAt = DateTime.now();
+      await _persist();
+    } catch (e) {
+      // 连贯性归档失败不影响已写正文。
+      stage = '连贯性归档失败（不影响正文）：$e';
+      notifyListeners();
+    }
+  }
+
+  String _stateUpdatePrompt(
+    ProBook book,
+    ProChapter chapter,
+    ProSection section,
+  ) =>
+      '''
+已有写作台账（截至上一节）：
+${book.bookState.trim().isEmpty ? '(空，全书刚开始写)' : book.bookState.trim()}
+
+刚完成的小节「${chapter.title} / ${section.title}」纪要：
+${section.recap.isEmpty ? section.brief : section.recap}
+
+请输出更新后的写作台账（合并新信息、删除冗余，控制在约 1200 字内），用以下结构：
+## 已覆盖的主题与深度
+## 术语与表述口径（全书统一用法）
+## 已引用的标准 / 法规 / 资料（准确名称与编号）
+## 尚未展开、后文需要衔接的点
+只输出台账正文，不要解释。''';
+
+  /// 从本节抽取「后文需保持一致」的关键事实（标准条款、定义、数据、口径），
+  /// 去重后写入本书知识记忆库。
+  Future<void> _extractCanon(ProBook book, ProSection section) async {
+    final store = _canon(book);
+    final headers = await store.scanHeaders();
+    final manifest = store.formatManifest(headers);
+    final reply = await _chat([
+      {
+        'role': 'system',
+        'content': '你负责从专业书稿中抽取需长期保持一致的"关键事实"，建立全书知识底账。只输出 JSON。',
+      },
+      {
+        'role': 'user',
+        'content':
+            '''
+从本节正文中抽取「后续小节必须保持一致」的关键事实（引用的标准/法规的准确名称与编号、术语定义、关键数据与参数、流程步骤的固定表述、易错点）。
+
+去重：下面是已有事实清单，若只是重复或补充已有项，请用 update 指向其文件名，不要新建近似项：
+${manifest.isEmpty ? '(空)' : manifest}
+
+严格输出 JSON：
+{"facts":[{"type":"project|reference","name":"<=10字短标题","description":"一句话索引","body":"具体内容","update":"可选,要更新的文件名"}]}
+（type：project=定义/口径/数据等事实，reference=标准/法规/资料的引用信息；没有可记的就 {"facts":[]}）
+
+本节正文：
+${_clip(section.content, 8000)}''',
+      },
+    ], jsonMode: true, role: ModelRole.small);
+    final m = _parseJson(reply);
+    final facts = (m['facts'] as List?) ?? [];
+    for (final f in facts.whereType<Map>()) {
+      final name = (f['name'] ?? '').toString().trim();
+      final body = (f['body'] ?? '').toString().trim();
+      if (name.isEmpty || body.isEmpty) continue;
+      final type = parseMemoryType(f['type']?.toString()) ?? MemoryType.project;
+      final update = (f['update'] ?? '').toString().trim();
+      await store.save(
+        name: name,
+        description: (f['description'] ?? '').toString().trim(),
+        type: type,
+        body: body,
+        filename: update.isEmpty ? null : update,
+      );
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1667,6 +2377,7 @@ ${_clip(ph.section.content, 3000)}
   static String _normalizeSource(String s) {
     final v = s.trim();
     if (v.contains('知识库')) return '知识库';
+    if (v.contains('上传')) return '上传';
     if (v.contains('网')) return '网页';
     return '手动';
   }
@@ -1694,87 +2405,43 @@ ${_clip(ph.section.content, 3000)}
     } catch (_) {}
   }
 
+  /// 统一走 [ModelClient]（超时/取消/SSE 解析集中管理）。默认写作通道，
+  /// 廉价任务可传 [role] = small，读图传 vision。
   Future<String> _chat(
-    List<Map<String, String>> messages, {
+    List<Map<String, dynamic>> messages, {
     bool jsonMode = false,
+    ModelRole role = ModelRole.writing,
+    Duration timeout = const Duration(minutes: 5),
   }) async {
-    const role = ModelRole.writing;
-    final client = _client = http.Client();
-    try {
-      final resp = await client.post(
-        Uri.parse('${settings.roleBaseUrl(role)}/chat/completions'),
-        headers: {
-          'Authorization': 'Bearer ${settings.roleApiKey(role)}',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'model': settings.roleModel(role),
-          'stream': false,
-          if (jsonMode) 'response_format': {'type': 'json_object'},
-          'messages': messages,
-        }),
-      );
-      if (resp.statusCode != 200) {
-        throw Exception('HTTP ${resp.statusCode} ${utf8.decode(resp.bodyBytes)}');
-      }
-      final j = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
-      final content =
-          (j['choices']?[0]?['message']?['content'] as String?)?.trim() ?? '';
-      if (content.isEmpty) throw Exception('模型未返回内容');
-      return content;
-    } finally {
-      client.close();
-      if (identical(_client, client)) _client = null;
-    }
+    final content = await ModelClient(settings, role: role).complete(
+      messages: messages,
+      jsonMode: jsonMode,
+      isCancelled: () => _cancel,
+      timeout: timeout,
+    );
+    if (content.isEmpty) throw Exception('模型未返回内容');
+    return content;
   }
 
-  Stream<String> _streamChat(List<Map<String, String>> messages) async* {
-    const role = ModelRole.writing;
-    final request = http.Request(
-      'POST',
-      Uri.parse('${settings.roleBaseUrl(role)}/chat/completions'),
-    );
-    request.headers['Authorization'] = 'Bearer ${settings.roleApiKey(role)}';
-    request.headers['Content-Type'] = 'application/json';
-    request.body = jsonEncode({
-      'model': settings.roleModel(role),
-      'messages': messages,
-      'stream': true,
-    });
-    final client = _client = http.Client();
-    try {
-      final response = await client.send(request);
-      if (response.statusCode != 200) {
-        final body = await response.stream.bytesToString();
-        throw Exception('HTTP ${response.statusCode} $body');
+  Stream<String> _streamChat(List<Map<String, dynamic>> messages) {
+    final controller = StreamController<String>();
+    () async {
+      try {
+        await ModelClient(settings, role: ModelRole.writing).stream(
+          messages: messages,
+          onTextDelta: (delta) {
+            if (!controller.isClosed) controller.add(delta);
+          },
+          isCancelled: () => _cancel,
+          timeout: const Duration(minutes: 10),
+        );
+      } catch (e) {
+        if (!controller.isClosed) controller.addError(e);
+      } finally {
+        await controller.close();
       }
-      var buffer = '';
-      await for (final chunk in response.stream.transform(utf8.decoder)) {
-        if (_cancel) return;
-        buffer += chunk;
-        while (true) {
-          final newline = buffer.indexOf('\n');
-          if (newline < 0) break;
-          final line = buffer.substring(0, newline).trim();
-          buffer = buffer.substring(newline + 1);
-          if (!line.startsWith('data:')) continue;
-          final data = line.substring(5).trim();
-          if (data.isEmpty) continue;
-          if (data == '[DONE]') return;
-          try {
-            final json = jsonDecode(data) as Map<String, dynamic>;
-            final content =
-                json['choices']?[0]?['delta']?['content'] as String?;
-            if (content != null && content.isNotEmpty) yield content;
-          } catch (_) {
-            // 忽略无法解析的流式片段。
-          }
-        }
-      }
-    } finally {
-      client.close();
-      if (identical(_client, client)) _client = null;
-    }
+    }();
+    return controller.stream;
   }
 
   Map<String, dynamic> _parseJson(String reply) {

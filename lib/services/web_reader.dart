@@ -11,8 +11,8 @@ import 'package:http/http.dart' as http;
 /// 这是一个跨模块共享能力：主题研究、Agent 的 read_url 工具、（未来）聊天等
 /// 都复用本类，避免各处各自重复实现网页抓取逻辑。
 class WebReader {
-  // 统一的 User-Agent，避免被部分站点按爬虫拦截。
-  static const _userAgent =
+  // 统一的 User-Agent，避免被部分站点按爬虫拦截。供直链下载等场景复用。
+  static const userAgent =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 
@@ -29,7 +29,7 @@ class WebReader {
           .get(
             Uri.parse('https://r.jina.ai/$target'),
             headers: {
-              'User-Agent': _userAgent,
+              'User-Agent': userAgent,
               'Accept': 'text/plain',
               'X-Return-Format': 'markdown',
             },
