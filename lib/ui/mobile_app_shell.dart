@@ -10,6 +10,7 @@ import '../services/library_service.dart';
 import '../services/mind_map_service.dart';
 import '../services/paper_service.dart';
 import '../services/pro_book_service.dart';
+import '../services/promo_service.dart';
 import '../services/settings_service.dart';
 import '../services/topic_service.dart';
 import 'chat_page.dart';
@@ -33,6 +34,7 @@ class MobileAppShell extends StatefulWidget {
     required this.mindMap,
     required this.book,
     required this.paper,
+    required this.promo,
   });
 
   final SettingsService settings;
@@ -46,6 +48,7 @@ class MobileAppShell extends StatefulWidget {
   final MindMapService mindMap;
   final BookService book;
   final PaperService paper;
+  final PromoService promo;
 
   @override
   State<MobileAppShell> createState() => _MobileAppShellState();
@@ -115,6 +118,7 @@ class _MobileAppShellState extends State<MobileAppShell> {
         mindMap: widget.mindMap,
         book: widget.book,
         paper: widget.paper,
+        promo: widget.promo,
       ),
       MobileSettingsPage(settings: widget.settings, library: widget.library),
     ];

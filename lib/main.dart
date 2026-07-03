@@ -19,6 +19,7 @@ import 'services/platform_capabilities.dart';
 import 'services/playwright_service.dart';
 import 'services/pro_book_service.dart';
 import 'services/project_service.dart';
+import 'services/promo_service.dart';
 import 'services/settings_service.dart';
 import 'services/system_proxy.dart';
 import 'services/topic_service.dart';
@@ -79,6 +80,7 @@ Future<void> main() async {
   final mindMap = MindMapService(settings);
   final book = BookService(settings);
   final paper = PaperService(settings);
+  final promo = PromoService(settings, project: project, memory: memory);
   // 「计划」：每日待办 + AI 分析并执行（复用统一 Agent 内核）。
   final plan = PlanService(settings, memory, research: topic);
   await chat.init();
@@ -94,6 +96,7 @@ Future<void> main() async {
   await mindMap.init();
   await book.init();
   await paper.init();
+  await promo.init();
   await plan.init();
   unawaited(library.reload());
   unawaited(fileLibrary.reload());
@@ -114,6 +117,7 @@ Future<void> main() async {
       mindMap: mindMap,
       book: book,
       paper: paper,
+      promo: promo,
       plan: plan,
     ),
   );
@@ -139,6 +143,7 @@ class MindApp extends StatelessWidget {
     required this.mindMap,
     required this.book,
     required this.paper,
+    required this.promo,
     required this.plan,
   });
 
@@ -157,6 +162,7 @@ class MindApp extends StatelessWidget {
   final MindMapService mindMap;
   final BookService book;
   final PaperService paper;
+  final PromoService promo;
   final PlanService plan;
 
   @override
@@ -187,6 +193,7 @@ class MindApp extends StatelessWidget {
               mindMap: mindMap,
               book: book,
               paper: paper,
+              promo: promo,
             )
           : AppShell(
               settings: settings,
@@ -204,6 +211,7 @@ class MindApp extends StatelessWidget {
               mindMap: mindMap,
               book: book,
               paper: paper,
+              promo: promo,
               plan: plan,
             ),
     );

@@ -15,6 +15,7 @@ import '../services/plan_service.dart';
 import '../services/playwright_service.dart';
 import '../services/pro_book_service.dart';
 import '../services/project_service.dart';
+import '../services/promo_service.dart';
 import '../services/settings_service.dart';
 import '../services/topic_service.dart';
 import '../services/zotero_service.dart';
@@ -45,6 +46,7 @@ class AppShell extends StatefulWidget {
     required this.mindMap,
     required this.book,
     required this.paper,
+    required this.promo,
     required this.plan,
   });
 
@@ -63,6 +65,7 @@ class AppShell extends StatefulWidget {
   final MindMapService mindMap;
   final BookService book;
   final PaperService paper;
+  final PromoService promo;
   final PlanService plan;
 
   @override
@@ -171,6 +174,7 @@ class _AppShellState extends State<AppShell> {
         mindMap: widget.mindMap,
         book: widget.book,
         paper: widget.paper,
+        promo: widget.promo,
         initialTab: _writingTab,
       ),
       PlanPage(plan: widget.plan),
