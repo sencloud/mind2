@@ -171,3 +171,8 @@ tool/make_ico.dart            图标生成辅助工具
 生成文件和本地构建产物会被忽略。需要时可以通过 `flutter pub get`、`flutter build` 或上面的脚本重新生成。
 
 应用仍在快速演进。改动应尽量小，提交前运行 `flutter analyze`，并优先使用符合现有服务和页面结构的简单 Flutter/Dart 代码。
+
+## 其他
+
+如果你喜欢我的项目，可以给我买杯咖啡：
+<img src="https://github.com/user-attachments/assets/e75ef971-ff56-41e5-88b9-317595d22f81" alt="image" width="300" height="300">
