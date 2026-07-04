@@ -217,6 +217,11 @@ class TopicFetchService extends ChangeNotifier {
   final Map<String, BrowserResearchResult> _browserReadsByUrl = {};
   final Map<String, String> _browserNotesByUrl = {};
 
+  /// 本次研究中「读图分析」模型是否已被判定为不支持图片输入。
+  /// 一旦某次调用因模型只接受纯文本而报错，就置为 true，
+  /// 后续网页证据分析直接跳过截图、改用纯文本，避免反复触发同样的错误。
+  bool _visionUnsupported = false;
+
   /// 已经在「直接读取主题内网址」阶段用 Jina/README 读过的网址，
   /// 后续收集流程据此跳过，避免对同一网址重复抓取。
   final Set<String> _directReadUrls = {};
@@ -313,8 +318,15 @@ class TopicFetchService extends ChangeNotifier {
 
 要求：
 - 每题给 3-6 个具体选项，用户可多选。
+- **每个选项必须是一个单一、具体的答案，绝不能是一句问句，也不能在一个选项里塞进两种待选方向。**
+- **严禁在单个选项内出现“还是 / 或者 / 或 / A还是B / ？”这类把多个候选并列的写法。** 如果某个点存在“A 还是 B”这种二选一的歧义，必须把它拆成一个独立的 question，并把 A、B 分别作为该 question 下的两个独立选项，让用户勾选其一。
+- 选项之间应尽量互斥、可区分，勾选任意一个都能明确锁定一个方向；不要让不同选项互相包含或语义重叠。
 - 不要把“其他/自己输入”写进 options，界面会自动提供最后的自定义输入框。
 - 选项必须具体、能帮助锁定研究方向与深度，不能写成“都可以”。
+
+示例（错误 vs 正确）：
+- 错误：{"prompt":"请明确细节","options":["‘归档’是指按印章类型自动分文件，还是指按印章位置分文件？"]}
+- 正确：{"prompt":"“归档”具体指哪种处理方式？","options":["按印章类型自动分文件","按印章位置分文件"]}
 ''';
     final content = await _chat(
       [
@@ -327,12 +339,10 @@ class TopicFetchService extends ChangeNotifier {
       jsonMode: true,
       useExperimentModel: settings.playwrightBrowserResearchEnabled,
     );
-    final start = content.indexOf('{');
-    final end = content.lastIndexOf('}');
-    if (start < 0 || end <= start) {
+    final parsed = _parseJsonObject(content);
+    if (parsed == null) {
       return TopicClarification(understanding: '', questions: const []);
     }
-    final parsed = jsonDecode(content.substring(start, end + 1)) as Map;
     final understanding = (parsed['understanding'] as String? ?? '').trim();
     final questions = <ClarifyQuestion>[];
     for (final q in (parsed['questions'] as List? ?? [])) {
@@ -364,6 +374,7 @@ class TopicFetchService extends ChangeNotifier {
     _browserReadsByUrl.clear();
     _browserNotesByUrl.clear();
     _directReadUrls.clear();
+    _visionUnsupported = false;
     var researchTitle = topic;
     logs.clear();
     notifyListeners();
@@ -735,9 +746,8 @@ $profileDesc
       useExperimentModel: settings.playwrightBrowserResearchEnabled,
     );
 
-    final start = content.indexOf('{');
-    final end = content.lastIndexOf('}');
-    if (start < 0 || end <= start) {
+    final parsed = _parseJsonObject(content);
+    if (parsed == null) {
       return _ResearchPlan(
         category: '其他',
         title: _cleanResearchTitle(topic),
@@ -746,7 +756,6 @@ $profileDesc
         profiles: const [],
       );
     }
-    final parsed = jsonDecode(content.substring(start, end + 1)) as Map;
     final title = _cleanResearchTitle(
       (parsed['title'] as String? ?? topic).trim(),
     );
@@ -1003,33 +1012,52 @@ ${read.visibleText.isEmpty ? read.excerpt : read.visibleText}
 严格输出 JSON：
 {"relevance":true,"note":"用中文写 3-6 句可靠摘录，说明页面和研究问题的关系。不要编造页面没有的信息。"}
 ''';
-    final contentParts = <Map<String, dynamic>>[
-      {'type': 'text', 'text': prompt},
-      if (read.screenshotBase64.isNotEmpty)
-        {
-          'type': 'image_url',
-          'image_url': {
-            'url': 'data:image/jpeg;base64,${read.screenshotBase64}',
-          },
-        },
-    ];
-    final content = await _chat(
-      [
-        {
-          'role': 'system',
-          'content': '你是网页研究助手。你会结合页面文字和截图判断相关性，只基于证据做摘要。只输出 JSON。',
-        },
-        {'role': 'user', 'content': contentParts},
-      ],
-      jsonMode: true,
-      useExperimentModel: true,
-    );
-    final start = content.indexOf('{');
-    final end = content.lastIndexOf('}');
-    if (start < 0 || end <= start) {
+    const system =
+        '你是网页研究助手。你会结合页面文字和截图判断相关性，只基于证据做摘要。只输出 JSON。';
+    // 页面截图需要视觉能力：走专门的「读图分析」模型通道。
+    // 若该模型不支持图片，则退化为纯文本分析（可见正文已足够判断相关性）。
+    final withImage = read.screenshotBase64.isNotEmpty && !_visionUnsupported;
+
+    Future<String> ask({required bool image}) {
+      final userContent = image
+          ? <Map<String, dynamic>>[
+              {'type': 'text', 'text': prompt},
+              {
+                'type': 'image_url',
+                'image_url': {
+                  'url': 'data:image/jpeg;base64,${read.screenshotBase64}',
+                },
+              },
+            ]
+          : prompt;
+      return _chat(
+        [
+          {'role': 'system', 'content': system},
+          {'role': 'user', 'content': userContent},
+        ],
+        jsonMode: true,
+        role: ModelRole.vision,
+      );
+    }
+
+    String content;
+    try {
+      content = await ask(image: withImage);
+    } catch (e) {
+      // 模型只接受纯文本、不支持图片输入时：记录日志并自动跳过截图，
+      // 本次改用纯文本分析，并标记后续网页也不再发送截图。
+      if (withImage && _isImageUnsupportedError(e)) {
+        _visionUnsupported = true;
+        _log('    读图模型不支持图片输入，已跳过网页截图，改用纯文本分析。');
+        content = await ask(image: false);
+      } else {
+        rethrow;
+      }
+    }
+    final parsed = _parseJsonObject(content);
+    if (parsed == null) {
       return _BrowserEvidenceAnalysis(relevant: true, note: read.excerpt);
     }
-    final parsed = jsonDecode(content.substring(start, end + 1)) as Map;
     return _BrowserEvidenceAnalysis(
       relevant: parsed['relevance'] != false,
       note: (parsed['note'] as String? ?? '').trim(),
@@ -1212,10 +1240,8 @@ $sourceText
         jsonMode: true,
         useExperimentModel: settings.playwrightBrowserResearchEnabled,
       );
-      final start = content.indexOf('{');
-      final end = content.lastIndexOf('}');
-      if (start < 0 || end <= start) throw const FormatException('no json');
-      final parsed = jsonDecode(content.substring(start, end + 1)) as Map;
+      final parsed = _parseJsonObject(content);
+      if (parsed == null) throw const FormatException('no json');
       final coverage = ((parsed['coverageScore'] as num?) ?? 0.0)
           .toDouble()
           .clamp(0.0, 1.0);
@@ -2744,14 +2770,56 @@ $body''';
     return out.isEmpty ? '未命名研究' : out;
   }
 
+  /// 宽松解析模型返回的 JSON 对象：大模型经常输出带 ```json 代码围栏、
+  /// 或对象/数组末尾多一个逗号的非法 JSON，Dart 的严格 jsonDecode 会直接抛
+  /// FormatException。这里先剥离围栏、截取最外层 {...}、去掉尾随逗号再解析；
+  /// 解析不出对象时返回 null，由调用方决定默认行为。
+  Map<String, dynamic>? _parseJsonObject(String raw) {
+    var t = raw.trim();
+    if (t.startsWith('```')) {
+      t = t
+          .replaceFirst(RegExp(r'^```[a-zA-Z]*\s*'), '')
+          .replaceFirst(RegExp(r'\s*```$'), '')
+          .trim();
+    }
+    final start = t.indexOf('{');
+    final end = t.lastIndexOf('}');
+    if (start < 0 || end <= start) return null;
+    // 去掉对象/数组结尾多余的逗号。注意 Dart 的 replaceAll 不解释 $1 反向引用，
+    // 必须用 replaceAllMapped 才能保留其后的 } 或 ]。
+    t = t.substring(start, end + 1).replaceAllMapped(
+          RegExp(r',(\s*[}\]])'),
+          (m) => m.group(1)!,
+        );
+    try {
+      final v = jsonDecode(t);
+      return v is Map ? Map<String, dynamic>.from(v) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 判断异常是否为「模型不支持图片输入」：这类模型只接受纯文本 content，
+  /// 收到 image_url 时供应商会返回类似 `messages.content.type 参数非法，
+  /// 取值范围 ['text']` 的 400 错误。命中后应跳过截图、改用纯文本，而非中断研究。
+  bool _isImageUnsupportedError(Object e) {
+    final s = e.toString().toLowerCase();
+    return s.contains('content.type') ||
+        s.contains("['text']") ||
+        s.contains('image_url') ||
+        (s.contains('400') && s.contains('image'));
+  }
+
   Future<String> _chat(
     List<Map<String, dynamic>> messages, {
     bool jsonMode = false,
     bool useExperimentModel = false,
+    ModelRole? role,
   }) async {
-    // 统一走 ModelClient：浏览研究/视觉判断用 agent（实验）通道，
-    // 其余研究规划/综合用 research 通道（默认仍是 DeepSeek，可在设置里改）。
-    final role = useExperimentModel ? ModelRole.agent : ModelRole.research;
+    // 统一走 ModelClient：浏览研究用 agent（实验）通道，读图/截图判断用
+    // vision 通道，其余研究规划/综合用 research 通道（默认 DeepSeek，可在设置里改）。
+    // 显式传入的 [role] 优先级最高。
+    role ??= useExperimentModel ? ModelRole.agent : ModelRole.research;
     final content = await ModelClient(
       settings,
       role: role,

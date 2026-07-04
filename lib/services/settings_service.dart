@@ -189,7 +189,11 @@ class SettingsService extends ChangeNotifier {
   String roleProviderKey(ModelRole role) {
     final saved = (_prefs.getString('role_${role.name}_provider') ?? '').trim();
     if (saved.isNotEmpty) return saved;
-    return role == ModelRole.agent ? experimentProvider : 'deepseek';
+    // agent 与 vision（读图/网页截图判断）默认跟随「实验/项目大模型」，
+    // 其余角色走默认 DeepSeek。用户可在设置里为任一角色单独覆盖。
+    return (role == ModelRole.agent || role == ModelRole.vision)
+        ? experimentProvider
+        : 'deepseek';
   }
 
   /// 该角色用户显式指定的供应商 key；为空表示沿用默认映射（供设置页展示）。
