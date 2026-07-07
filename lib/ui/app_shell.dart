@@ -14,6 +14,7 @@ import '../services/paper_service.dart';
 import '../services/plan_service.dart';
 import '../services/playwright_service.dart';
 import '../services/pro_book_service.dart';
+import '../services/project_doc_service.dart';
 import '../services/project_service.dart';
 import '../services/promo_service.dart';
 import '../services/settings_service.dart';
@@ -41,6 +42,7 @@ class AppShell extends StatefulWidget {
     required this.playwright,
     required this.experiment,
     required this.project,
+    required this.projectDoc,
     required this.document,
     required this.proBook,
     required this.mindMap,
@@ -60,6 +62,7 @@ class AppShell extends StatefulWidget {
   final PlaywrightService playwright;
   final ExperimentService experiment;
   final ProjectService project;
+  final ProjectDocService projectDoc;
   final DocumentService document;
   final ProBookService proBook;
   final MindMapService mindMap;
@@ -160,6 +163,7 @@ class _AppShellState extends State<AppShell> {
       ),
       ProjectPage(
         project: widget.project,
+        projectDoc: widget.projectDoc,
         onOpenResearch: (notePath) {
           final matches = widget.library.notes.where(
             (n) => n.filePath == notePath,

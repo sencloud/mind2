@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -7,6 +8,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../models.dart';
+import 'code_index_service.dart';
 import 'settings_service.dart';
 
 enum PaperFormat {
@@ -84,6 +86,8 @@ class PaperDraft {
     required this.sourceBody,
     required this.createdAt,
     required this.updatedAt,
+    this.linkedProjectPath = '',
+    this.projectDigest = '',
     List<PaperSection>? sections,
   }) : sections = sections ?? [];
 
@@ -98,6 +102,17 @@ class PaperDraft {
   DateTime updatedAt;
   List<PaperSection> sections;
 
+  /// 关联的实验工程目录（真实代码工程），用于解读并把真实实现落地进论文。
+  String linkedProjectPath;
+
+  /// 对关联实验工程的解读摘要（基于真实文件生成），注入方法/实验/相关工作写作。
+  String projectDigest;
+
+  String get linkedProjectName =>
+      linkedProjectPath.isEmpty ? '' : p.basename(linkedProjectPath);
+
+  bool get hasLinkedProject => linkedProjectPath.trim().isNotEmpty;
+
   int get doneSections => sections.where((s) => s.hasContent).length;
   int get totalWords => sections.fold(0, (sum, section) => sum + section.words);
 
@@ -111,6 +126,8 @@ class PaperDraft {
     'sourceBody': sourceBody,
     'createdAt': createdAt.toIso8601String(),
     'updatedAt': updatedAt.toIso8601String(),
+    'linkedProjectPath': linkedProjectPath,
+    'projectDigest': projectDigest,
     'sections': sections.map((section) => section.toJson()).toList(),
   };
 
@@ -126,6 +143,8 @@ class PaperDraft {
         DateTime.tryParse(json['createdAt'] as String? ?? '') ?? DateTime.now(),
     updatedAt:
         DateTime.tryParse(json['updatedAt'] as String? ?? '') ?? DateTime.now(),
+    linkedProjectPath: json['linkedProjectPath'] as String? ?? '',
+    projectDigest: json['projectDigest'] as String? ?? '',
     sections: ((json['sections'] as List?) ?? [])
         .whereType<Map>()
         .map(
@@ -271,6 +290,14 @@ class PaperService extends ChangeNotifier {
         await _planPaper(draft);
       }
       if (_cancel) return;
+      // 关联了实验工程但尚未解读：先解读，确保方法/实验设置能引用真实实现。
+      if (draft.hasLinkedProject && draft.projectDigest.trim().isEmpty) {
+        stage = '正在解读关联实验工程…';
+        notifyListeners();
+        draft.projectDigest = await _buildProjectDigest(draft);
+        await _persist();
+      }
+      if (_cancel) return;
       final total = draft.sections.length;
       for (var i = 0; i < draft.sections.length; i++) {
         if (_cancel) break;
@@ -295,6 +322,190 @@ class PaperService extends ChangeNotifier {
       _end();
       await _persist();
     }
+  }
+
+  /// 关联 / 取消关联实验工程目录。切换工程会清空旧的解读摘要。
+  Future<void> setLinkedProject(String? path) async {
+    final draft = current;
+    if (draft == null) return;
+    final normalized = (path ?? '').trim();
+    if (draft.linkedProjectPath == normalized) return;
+    draft.linkedProjectPath = normalized;
+    draft.projectDigest = '';
+    draft.updatedAt = DateTime.now();
+    notifyListeners();
+    await _persist();
+  }
+
+  /// 解读关联的实验工程：读取工程内真实文件（README、依赖清单、训练/模型/
+  /// 实验/配置等源码），调用模型提炼方法与实验设置的真实摘要，缓存到
+  /// draft.projectDigest，供各章节写作直接引用、真实落地到论文。
+  Future<void> interpretProject([PaperDraft? target]) async {
+    final draft = target ?? current;
+    if (draft == null || busy) return;
+    if (!draft.hasLinkedProject) {
+      stage = '尚未关联实验工程';
+      notifyListeners();
+      return;
+    }
+    _begin('正在解读实验工程…');
+    try {
+      final digest = await _buildProjectDigest(draft);
+      if (_cancel) return;
+      draft.projectDigest = digest;
+      draft.updatedAt = DateTime.now();
+      stage = '实验工程解读完成';
+      await _persist();
+    } catch (e) {
+      stage = _cancel ? '已停止' : '解读实验工程失败：$e';
+    } finally {
+      _end();
+    }
+  }
+
+  Future<String> _buildProjectDigest(PaperDraft draft) async {
+    final dir = Directory(draft.linkedProjectPath);
+    if (!await dir.exists()) {
+      throw Exception('实验工程目录不存在：${draft.linkedProjectPath}');
+    }
+    stage = '正在收集工程文件…';
+    notifyListeners();
+    final context = await compute(
+      _collectProjectContext,
+      draft.linkedProjectPath,
+    );
+    if (context.trim().isEmpty) throw Exception('工程内未找到可解读的文件');
+    stage = '正在提炼工程的方法与实验设置…';
+    notifyListeners();
+    final reply = await _chat([
+      {
+        'role': 'system',
+        'content':
+            '你是严谨的科研工程分析专家。你只依据给定的真实工程文件内容做客观解读，'
+            '不臆测、不编造；工程中没有体现的信息一律如实标注“工程中未体现”。',
+      },
+      {'role': 'user', 'content': _projectDigestPrompt(draft, context)},
+    ]);
+    return reply.trim();
+  }
+
+  String _projectDigestPrompt(PaperDraft draft, String context) => '''
+下面是论文关联「实验工程」中的真实文件内容（含文件路径）。请据此客观解读该工程，
+产出结构化中文「工程解读」，供论文的方法、实验设置、相关工作等章节直接引用。
+要求真实、具体、可核对，严禁编造工程中不存在的内容；工程未体现的信息请写“工程中未体现”。
+
+论文题目：${draft.titleZh}
+
+请按如下小节输出（Markdown 小标题）：
+## 工程概述与目标
+## 实现的方法/模型/算法（列出真实的模块、类、函数、关键实现思路与流程）
+## 实验设置（数据集与来源、数据预处理、模型与超参数配置、训练与优化设置、评价指标、运行环境与依赖版本）
+## 关键结果或产出（若代码/配置/日志中有则如实提取，否则写“工程中未体现”）
+## 目录结构要点
+
+工程文件内容如下：
+$context
+''';
+
+  /// 在后台 isolate 遍历实验工程，收集用于解读的关键文件内容（含路径）。
+  /// 优先文档与依赖清单、配置，再按文件名关键词挑选训练/模型/实验类源码，
+  /// 控制总字数预算，避免超出模型上下文。
+  static String _collectProjectContext(String rootPath) {
+    const ignore = CodeIndexService.ignoreDirs;
+    const srcExts = {
+      '.py', '.dart', '.js', '.ts', '.tsx', '.jsx', '.java', '.kt', '.go',
+      '.rs', '.cpp', '.c', '.h', '.hpp', '.cc', '.m', '.scala', '.cs', '.rb',
+      '.lua', '.jl', '.ipynb',
+    };
+    const manifestNames = {
+      'requirements.txt', 'pyproject.toml', 'setup.py', 'setup.cfg',
+      'environment.yml', 'environment.yaml', 'package.json', 'pubspec.yaml',
+      'cargo.toml', 'go.mod', 'pom.xml', 'build.gradle', 'makefile',
+      'dockerfile',
+    };
+    const keywords = [
+      'train', 'model', 'net', 'experiment', 'exp', 'eval', 'evaluat',
+      'metric', 'dataset', 'data', 'main', 'run', 'config', 'args', 'loss',
+      'optim', 'pipeline', 'benchmark', 'infer', 'predict',
+    ];
+    final docs = <File>[];
+    final manifests = <File>[];
+    final configs = <File>[];
+    final scored = <(int, File)>[];
+
+    void walk(Directory dir, int depth) {
+      List<FileSystemEntity> entries;
+      try {
+        entries = dir.listSync(followLinks: false);
+      } catch (_) {
+        return;
+      }
+      for (final e in entries) {
+        final name = p.basename(e.path);
+        final lower = name.toLowerCase();
+        if (e is Directory) {
+          if (ignore.contains(name) || name.startsWith('.')) continue;
+          if (depth < 4) walk(e, depth + 1);
+        } else if (e is File) {
+          final ext = p.extension(lower);
+          if (lower.startsWith('readme') || (ext == '.md' && depth <= 1)) {
+            docs.add(e);
+          } else if (manifestNames.contains(lower)) {
+            manifests.add(e);
+          } else if (['.yaml', '.yml', '.toml', '.ini', '.cfg'].contains(ext) ||
+              (ext == '.json' && depth <= 2)) {
+            configs.add(e);
+          } else if (srcExts.contains(ext)) {
+            var score = depth <= 1 ? 1 : 0;
+            for (final k in keywords) {
+              if (lower.contains(k)) score += 2;
+            }
+            scored.add((score, e));
+          }
+        }
+      }
+    }
+
+    walk(Directory(rootPath), 0);
+    scored.sort((a, b) => b.$1.compareTo(a.$1));
+
+    final buf = StringBuffer();
+    var budget = 60000;
+    String relOf(File f) =>
+        p.relative(f.path, from: rootPath).replaceAll('\\', '/');
+    void addFile(File f, int cap) {
+      if (budget <= 0) return;
+      String content;
+      try {
+        content = f.readAsStringSync();
+      } catch (_) {
+        return;
+      }
+      if (content.trim().isEmpty) return;
+      if (content.length > cap) content = '${content.substring(0, cap)}\n…（内容截断）';
+      buf
+        ..writeln('### 文件：${relOf(f)}')
+        ..writeln(content)
+        ..writeln();
+      budget -= content.length;
+    }
+
+    for (final f in docs) {
+      addFile(f, 8000);
+    }
+    for (final f in manifests) {
+      addFile(f, 4000);
+    }
+    for (final f in configs.take(15)) {
+      addFile(f, 3000);
+    }
+    final manyFiles = scored.length > 25;
+    for (final (score, f) in scored) {
+      if (budget <= 0) break;
+      if (manyFiles && score <= 0) continue; // 文件多时只取与实验相关的
+      addFile(f, 5000);
+    }
+    return buf.toString();
   }
 
   void cancel() {
@@ -327,6 +538,38 @@ class PaperService extends ChangeNotifier {
     );
     await _openExportDirectory(dir.path);
     return [enFile.path, zhFile.path];
+  }
+
+  /// 导出 Markdown：中文稿、英文稿各一份 .md，写入导出目录并打开。
+  Future<List<String>> exportMarkdown() async {
+    final draft = current;
+    if (draft == null) throw StateError('未打开论文');
+    final dir = Directory(p.join(settings.vaultPath, '4-书稿', '论文'));
+    await dir.create(recursive: true);
+    final baseName = _sanitize(draft.titleZh);
+    final zhFile = File(p.join(dir.path, '$baseName-中文稿.md'));
+    final enFile = File(p.join(dir.path, '$baseName-英文稿.md'));
+    await zhFile.writeAsString(_markdownDoc(draft, english: false));
+    await enFile.writeAsString(_markdownDoc(draft, english: true));
+    await _openExportDirectory(dir.path);
+    return [zhFile.path, enFile.path];
+  }
+
+  /// 生成单语言 Markdown 文档（题目 + 各章节正文），用于导出。
+  String _markdownDoc(PaperDraft draft, {required bool english}) {
+    final buf = StringBuffer()
+      ..writeln('# ${english ? draft.titleEn : draft.titleZh}')
+      ..writeln();
+    for (final section in draft.sections) {
+      final title = english ? section.enTitle : section.zhTitle;
+      final body = (english ? section.en : section.zh).trim();
+      buf
+        ..writeln('## $title')
+        ..writeln()
+        ..writeln(body.isEmpty ? (english ? '(To be written)' : '（待撰写）') : body)
+        ..writeln();
+    }
+    return buf.toString();
   }
 
   String renderPreview(PaperDraft draft, {bool english = false}) {
@@ -401,8 +644,7 @@ ${_clip(draft.sourceBody, 18000)}
     PaperSection section, {
     required bool english,
   }) async {
-    var acc = '';
-    await for (final delta in _streamChat([
+    final messages = [
       {
         'role': 'system',
         'content': english ? _englishSystem(draft) : _chineseSystem(draft),
@@ -411,17 +653,59 @@ ${_clip(draft.sourceBody, 18000)}
         'role': 'user',
         'content': _sectionPrompt(draft, section, english: english),
       },
-    ])) {
+    ];
+    // 长流式响应常被服务端/中间代理中途断开（Connection closed while receiving
+    // data）。这里对「网络中断」做有限次数重试：清空本节已生成内容后整节重写，
+    // 避免任何一次断线就让整篇写作失败。用户主动停止或非网络类错误不重试。
+    const maxAttempts = 3;
+    Object? lastError;
+    final baseStage = stage;
+    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
       if (_cancel) break;
-      acc += delta;
-      if (english) {
-        section.en = acc;
-      } else {
-        section.zh = acc;
+      var acc = '';
+      try {
+        await for (final delta in _streamChat(messages)) {
+          if (_cancel) break;
+          acc += delta;
+          if (english) {
+            section.en = acc;
+          } else {
+            section.zh = acc;
+          }
+          notifyListeners();
+        }
+        return acc.trim();
+      } catch (e) {
+        lastError = e;
+        if (_cancel || !_isTransientNetworkError(e)) rethrow;
+        if (english) {
+          section.en = '';
+        } else {
+          section.zh = '';
+        }
+        stage = '$baseStage 网络中断，正在重试（$attempt/$maxAttempts）…';
+        notifyListeners();
+        await Future.delayed(Duration(seconds: attempt * 2));
       }
-      notifyListeners();
     }
-    return acc.trim();
+    if (_cancel) return english ? section.en.trim() : section.zh.trim();
+    throw Exception('本节连续 $maxAttempts 次因网络中断写作失败：$lastError');
+  }
+
+  /// 判断是否为可重试的瞬时网络错误（连接被断开 / 超时等），而非模型/参数错误。
+  static bool _isTransientNetworkError(Object e) {
+    if (e is SocketException || e is TimeoutException) return true;
+    if (e is http.ClientException) return true;
+    final s = e.toString().toLowerCase();
+    return s.contains('connection closed') ||
+        s.contains('connection reset') ||
+        s.contains('connection terminated') ||
+        s.contains('connection refused') ||
+        s.contains('broken pipe') ||
+        s.contains('timed out') ||
+        s.contains('timeout') ||
+        s.contains('httpexception') ||
+        s.contains('clientexception');
   }
 
   String _chineseSystem(PaperDraft draft) {
@@ -451,6 +735,20 @@ ${_clip(draft.sourceBody, 18000)}
         : (english
               ? 'Use clean Markdown suitable for journal manuscript preview.'
               : '使用清晰 Markdown，适合期刊论文稿件预览。');
+    final hasDigest = draft.projectDigest.trim().isNotEmpty;
+    final projectBlock = !hasDigest
+        ? ''
+        : '''
+
+关联实验工程的真实解读（基于工程真实文件生成，务必据此写作，尤其是方法、实验设置、相关工作、结果等章节）：
+${_clip(draft.projectDigest, 8000)}
+''';
+    // 有真实工程解读时，要求据此落地真实实现与实验配置；否则沿用审慎表述。
+    final evidenceRule = hasDigest
+        ? '- 方法、实验设置、结果等内容必须依据上面「关联实验工程的真实解读」如实撰写，'
+              '引用真实的模块/算法、数据集、超参数、评价指标、运行环境等；'
+              '严禁编造工程中不存在的数据、配置或结论；工程未体现处如实说明。'
+        : '- 不编造真实实验数据或不存在的引用；若来源报告缺少数据，用审慎表述说明需要后续实证验证。';
     return '''
 论文题目：
 ${english ? draft.titleEn : draft.titleZh}
@@ -466,10 +764,10 @@ ${section.brief}
 
 来源研究报告：
 ${_clip(draft.sourceBody, 16000)}
-
+$projectBlock
 要求：
 - 按标准 SCI 期刊论文写作套路组织内容，强调研究问题、方法、发现和学术贡献。
-- 不编造真实实验数据或不存在的引用；若来源报告缺少数据，用审慎表述说明需要后续实证验证。
+$evidenceRule
 - $formatHint
 - 只输出当前部分正文。''';
   }
@@ -1227,13 +1525,18 @@ ${_clip(draft.sourceBody, 16000)}
 
     final client = _client = http.Client();
     try {
-      final response = await client.send(request);
+      final response = await client
+          .send(request)
+          .timeout(const Duration(seconds: 60));
       if (response.statusCode != 200) {
         final body = await response.stream.bytesToString();
         throw Exception('HTTP ${response.statusCode} $body');
       }
       var buffer = '';
-      await for (final chunk in response.stream.transform(utf8.decoder)) {
+      // 空闲超时：若长时间没有新数据流入，判定连接假死并抛出，由上层重试。
+      await for (final chunk in response.stream
+          .transform(utf8.decoder)
+          .timeout(const Duration(seconds: 90))) {
         if (_cancel) return;
         buffer += chunk;
         while (true) {

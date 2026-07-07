@@ -18,6 +18,7 @@ import 'services/plan_service.dart';
 import 'services/platform_capabilities.dart';
 import 'services/playwright_service.dart';
 import 'services/pro_book_service.dart';
+import 'services/project_doc_service.dart';
 import 'services/project_service.dart';
 import 'services/promo_service.dart';
 import 'services/settings_service.dart';
@@ -72,6 +73,7 @@ Future<void> main() async {
   final experiment = ExperimentService(settings, memory);
   final project = ProjectService(settings, memory, research: topic);
   final document = DocumentService(settings);
+  final projectDoc = ProjectDocService(settings, memory, document, library);
   final proBook = ProBookService(
     settings,
     library: library,
@@ -92,6 +94,9 @@ Future<void> main() async {
     await project.init();
   }
   await document.init();
+  if (PlatformCapabilities.supportsProjectDev) {
+    await projectDoc.init();
+  }
   await proBook.init();
   await mindMap.init();
   await book.init();
@@ -112,6 +117,7 @@ Future<void> main() async {
       playwright: playwright,
       experiment: experiment,
       project: project,
+      projectDoc: projectDoc,
       document: document,
       proBook: proBook,
       mindMap: mindMap,
@@ -138,6 +144,7 @@ class MindApp extends StatelessWidget {
     required this.playwright,
     required this.experiment,
     required this.project,
+    required this.projectDoc,
     required this.document,
     required this.proBook,
     required this.mindMap,
@@ -157,6 +164,7 @@ class MindApp extends StatelessWidget {
   final PlaywrightService playwright;
   final ExperimentService experiment;
   final ProjectService project;
+  final ProjectDocService projectDoc;
   final DocumentService document;
   final ProBookService proBook;
   final MindMapService mindMap;
@@ -206,6 +214,7 @@ class MindApp extends StatelessWidget {
               playwright: playwright,
               experiment: experiment,
               project: project,
+              projectDoc: projectDoc,
               document: document,
               proBook: proBook,
               mindMap: mindMap,

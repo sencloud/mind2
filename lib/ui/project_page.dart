@@ -7,15 +7,25 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../services/agent/agent_event.dart';
 import '../services/code_index_service.dart';
+import '../services/project_doc_service.dart';
 import '../services/project_service.dart';
 import 'agent_events_view.dart';
 import 'code_view.dart';
 import 'enter_to_send.dart';
+import 'project_overview_page.dart';
 
 class ProjectPage extends StatefulWidget {
-  const ProjectPage({super.key, required this.project, this.onOpenResearch});
+  const ProjectPage({
+    super.key,
+    required this.project,
+    required this.projectDoc,
+    this.onOpenResearch,
+  });
 
   final ProjectService project;
+
+  /// 「按项目写文档」服务：管理文档模版与按工程生成文档。
+  final ProjectDocService projectDoc;
 
   /// 点击项目头部的研究 tag 时，跳转到对应研究报告。
   final void Function(String researchPath)? onOpenResearch;
@@ -88,6 +98,42 @@ class _ProjectPageState extends State<ProjectPage> {
         await FilePicker.getDirectoryPath(dialogTitle: '选择要打开的项目文件夹');
     if (dir == null) return;
     widget.project.openProject(dir);
+  }
+
+  /// 打开「项目文档模版」管理弹窗：按标准分类上传模版文件。
+  Future<void> _openTemplates() async {
+    await showDialog<void>(
+      context: context,
+      builder: (_) => _TemplatesDialog(service: widget.projectDoc),
+    );
+  }
+
+  /// 打开「项目概览」弹窗：功能树 + 文档清单，支持在线阅读/下载/续写/修订。
+  Future<void> _openOverview(String projectPath) async {
+    await showDialog<void>(
+      context: context,
+      builder: (_) => ProjectOverviewDialog(
+        service: widget.projectDoc,
+        projectPath: projectPath,
+      ),
+    );
+  }
+
+  /// 打开「按工程生成文档」弹窗：选择要生成的文档并实时查看进度。
+  Future<void> _openGenerateDocs(String projectPath) async {
+    if (widget.projectDoc.generating &&
+        widget.projectDoc.currentProjectPath != projectPath) {
+      _toast('已有文档生成任务在进行中，请稍候');
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _GenerateDocsDialog(
+        service: widget.projectDoc,
+        projectPath: projectPath,
+      ),
+    );
   }
 
   Future<void> _newProject() async {
@@ -184,6 +230,12 @@ class _ProjectPageState extends State<ProjectPage> {
                       icon: const Icon(Icons.folder_open_outlined, size: 16),
                       label: const Text('打开文件夹'),
                     ),
+                    const SizedBox(width: 10),
+                    OutlinedButton.icon(
+                      onPressed: _openTemplates,
+                      icon: const Icon(Icons.library_books_outlined, size: 16),
+                      label: const Text('项目文档模版'),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 6),
@@ -249,6 +301,8 @@ class _ProjectPageState extends State<ProjectPage> {
                   name: name,
                   path: path,
                   onOpen: () => proj.openProject(path),
+                  onGenDocs: () => _openGenerateDocs(path),
+                  onOverview: () => _openOverview(path),
                   onReveal: () => launchUrl(Uri.file(path)),
                   onRemove: () => proj.removeProject(path),
                 );
@@ -501,6 +555,13 @@ class _ProjectPageState extends State<ProjectPage> {
                 (proj.running || proj.activeConv == null || !proj.canResearch)
                     ? null
                     : () => _startResearch(proj),
+          ),
+          IconButton(
+            tooltip: '项目概览（功能树 / 文档 / 续写 / 修订）',
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.account_tree_outlined, size: 16),
+            color: const Color(0xFF7C3AED),
+            onPressed: () => _openOverview(path),
           ),
           IconButton(
             tooltip: '在资源管理器中打开',
@@ -1165,6 +1226,8 @@ class _ProjectTile extends StatelessWidget {
     required this.name,
     required this.path,
     required this.onOpen,
+    required this.onGenDocs,
+    required this.onOverview,
     required this.onReveal,
     required this.onRemove,
   });
@@ -1172,6 +1235,8 @@ class _ProjectTile extends StatelessWidget {
   final String name;
   final String path;
   final VoidCallback onOpen;
+  final VoidCallback onGenDocs;
+  final VoidCallback onOverview;
   final VoidCallback onReveal;
   final VoidCallback onRemove;
 
@@ -1212,6 +1277,20 @@ class _ProjectTile extends StatelessWidget {
                 ),
               ),
               IconButton(
+                tooltip: '根据工程生成项目文档',
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.description_outlined,
+                    size: 16, color: Color(0xFF0D9488)),
+                onPressed: onGenDocs,
+              ),
+              IconButton(
+                tooltip: '项目概览（功能树 / 文档 / 续写 / 修订）',
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.account_tree_outlined,
+                    size: 16, color: Color(0xFF7C3AED)),
+                onPressed: onOverview,
+              ),
+              IconButton(
                 tooltip: '在资源管理器中打开',
                 visualDensity: VisualDensity.compact,
                 icon: const Icon(Icons.open_in_new,
@@ -1228,6 +1307,598 @@ class _ProjectTile extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// 「项目文档模版」管理弹窗：按标准分类上传/替换/清除模版文件（docx/xlsx）。
+class _TemplatesDialog extends StatelessWidget {
+  const _TemplatesDialog({required this.service});
+
+  final ProjectDocService service;
+
+  Future<void> _pick(BuildContext context, String categoryId) async {
+    final result = await FilePicker.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['docx', 'xlsx'],
+      dialogTitle: '选择该分类的文档模版（docx / xlsx）',
+    );
+    final path = result?.files.single.path;
+    if (path == null) return;
+    try {
+      await service.importTemplate(categoryId, path);
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('导入失败：$e')));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // 按分组聚合分类，便于展示。
+    final groups = <String, List<ProjectDocCategory>>{};
+    for (final c in ProjectDocService.categories) {
+      groups.putIfAbsent(c.group, () => []).add(c);
+    }
+    return Dialog(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 620, maxHeight: 640),
+        child: ListenableBuilder(
+          listenable: service,
+          builder: (context, _) {
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 18, 12, 8),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.library_books_outlined,
+                          size: 18, color: Color(0xFF0D9488)),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text('项目文档模版',
+                            style: TextStyle(
+                                fontSize: 15, fontWeight: FontWeight.w600)),
+                      ),
+                      Text('已配置 ${service.templateCount} 个',
+                          style: const TextStyle(
+                              fontSize: 12, color: Color(0xFF9B9B9F))),
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 18),
+                        onPressed: () => Navigator.pop(context),
+                      ),
+                    ],
+                  ),
+                ),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(20, 0, 20, 8),
+                  child: Text(
+                    '按标准分类上传模版文件（docx/xlsx）。上传后，生成文档时会严格参照模版的章节结构与栏目组织内容。模版为全局标准，可跨项目复用。',
+                    style: TextStyle(fontSize: 12, color: Color(0xFF6B6B70)),
+                  ),
+                ),
+                const Divider(height: 1, color: Color(0xFFECECEE)),
+                Flexible(
+                  child: ListView(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                    children: [
+                      for (final entry in groups.entries) ...[
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(4, 10, 4, 6),
+                          child: Text(entry.key,
+                              style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFF0D9488))),
+                        ),
+                        for (final cat in entry.value)
+                          _templateRow(context, cat),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _templateRow(BuildContext context, ProjectDocCategory cat) {
+    final tpl = service.templateFor(cat.id);
+    final has = tpl != null;
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 3),
+      padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFAFAFB),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFECECEE)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('${cat.fileBase.split('-').first}·${cat.name}',
+                    style: const TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 2),
+                Row(
+                  children: [
+                    Icon(
+                      has ? Icons.check_circle : Icons.upload_file_outlined,
+                      size: 12,
+                      color: has
+                          ? const Color(0xFF0D9488)
+                          : const Color(0xFFB0B0B6),
+                    ),
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text(
+                        has ? tpl.fileName : '未上传模版（可选，将用内置结构生成）',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            fontSize: 11.5,
+                            color: has
+                                ? const Color(0xFF0D9488)
+                                : const Color(0xFF9B9B9F)),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          if (has)
+            IconButton(
+              tooltip: '清除模版',
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.delete_outline,
+                  size: 16, color: Color(0xFF9B9B9F)),
+              onPressed: () => service.removeTemplate(cat.id),
+            ),
+          TextButton(
+            onPressed: () => _pick(context, cat.id),
+            child: Text(has ? '替换' : '上传', style: const TextStyle(fontSize: 12.5)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 「按工程生成文档」弹窗：先选择要生成的文档，再实时查看生成进度。
+class _GenerateDocsDialog extends StatefulWidget {
+  const _GenerateDocsDialog({required this.service, required this.projectPath});
+
+  final ProjectDocService service;
+  final String projectPath;
+
+  @override
+  State<_GenerateDocsDialog> createState() => _GenerateDocsDialogState();
+}
+
+class _GenerateDocsDialogState extends State<_GenerateDocsDialog> {
+  final Set<String> _selected = {
+    for (final c in ProjectDocService.categories) c.id,
+  };
+  final _logScroll = ScrollController();
+
+  bool get _isRunningThis =>
+      widget.service.generating &&
+      widget.service.currentProjectPath == widget.projectPath;
+
+  bool get _hasResultForThis =>
+      widget.service.currentProjectPath == widget.projectPath &&
+      widget.service.items.isNotEmpty;
+
+  @override
+  void dispose() {
+    _logScroll.dispose();
+    super.dispose();
+  }
+
+  Future<void> _start() async {
+    if (_selected.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('请至少选择一个文档')));
+      return;
+    }
+    try {
+      await widget.service.generate(
+        projectPath: widget.projectPath,
+        categoryIds: _selected.toList(),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$e')));
+      }
+    }
+  }
+
+  void _scrollLogToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_logScroll.hasClients) {
+        _logScroll.jumpTo(_logScroll.position.maxScrollExtent);
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 680, maxHeight: 680),
+        child: ListenableBuilder(
+          listenable: widget.service,
+          builder: (context, _) {
+            final showProgress = _isRunningThis || _hasResultForThis;
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _header(context, showProgress),
+                const Divider(height: 1, color: Color(0xFFECECEE)),
+                Flexible(
+                  child: showProgress ? _progressView() : _selectView(),
+                ),
+                const Divider(height: 1, color: Color(0xFFECECEE)),
+                _footer(context, showProgress),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _header(BuildContext context, bool showProgress) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 16, 12, 12),
+      child: Row(
+        children: [
+          const Icon(Icons.description_outlined,
+              size: 18, color: Color(0xFF0D9488)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('根据工程生成项目文档',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 2),
+                Text(
+                  showProgress
+                      ? widget.service.phase
+                      : '将深入阅读工程代码、理解整体结构（含子工程），再逐个功能模块生成文档',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 11.5, color: Color(0xFF9B9B9F)),
+                ),
+              ],
+            ),
+          ),
+          if (!_isRunningThis)
+            IconButton(
+              icon: const Icon(Icons.close, size: 18),
+              onPressed: () => Navigator.pop(context),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _selectView() {
+    final svc = widget.service;
+    final allSelected = _selected.length == ProjectDocService.categories.length;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 10, 12, 4),
+          child: Row(
+            children: [
+              Text('已选 ${_selected.length}/${ProjectDocService.categories.length}',
+                  style: const TextStyle(
+                      fontSize: 12.5, color: Color(0xFF6B6B70))),
+              const Spacer(),
+              TextButton(
+                onPressed: () => setState(() {
+                  if (allSelected) {
+                    _selected.clear();
+                  } else {
+                    _selected
+                      ..clear()
+                      ..addAll(ProjectDocService.categories.map((c) => c.id));
+                  }
+                }),
+                child: Text(allSelected ? '全不选' : '全选',
+                    style: const TextStyle(fontSize: 12.5)),
+              ),
+            ],
+          ),
+        ),
+        Flexible(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            children: [
+              for (final cat in ProjectDocService.categories)
+                _selectRow(svc, cat),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _selectRow(ProjectDocService svc, ProjectDocCategory cat) {
+    final checked = _selected.contains(cat.id);
+    final tpl = svc.templateFor(cat.id);
+    return InkWell(
+      borderRadius: BorderRadius.circular(8),
+      onTap: () => setState(() {
+        if (checked) {
+          _selected.remove(cat.id);
+        } else {
+          _selected.add(cat.id);
+        }
+      }),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 24,
+              child: Checkbox(
+                value: checked,
+                visualDensity: VisualDensity.compact,
+                onChanged: (v) => setState(() {
+                  if (v == true) {
+                    _selected.add(cat.id);
+                  } else {
+                    _selected.remove(cat.id);
+                  }
+                }),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Text(cat.name,
+                          style: const TextStyle(
+                              fontSize: 13, fontWeight: FontWeight.w600)),
+                      const SizedBox(width: 8),
+                      if (tpl != null)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 5, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF0D9488)
+                                .withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Text('含模版',
+                              style: TextStyle(
+                                  fontSize: 10,
+                                  color: Color(0xFF0D9488),
+                                  fontWeight: FontWeight.w600)),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 1),
+                  Text(cat.description,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontSize: 11.5, color: Color(0xFF9B9B9F))),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _progressView() {
+    final svc = widget.service;
+    _scrollLogToBottom();
+    final total = svc.items.length;
+    final done = svc.doneCount;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 6),
+          child: Row(
+            children: [
+              if (_isRunningThis)
+                const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: Color(0xFF0D9488)),
+                )
+              else
+                const Icon(Icons.check_circle,
+                    size: 16, color: Color(0xFF0D9488)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(svc.phase,
+                    style: const TextStyle(
+                        fontSize: 12.5, fontWeight: FontWeight.w600)),
+              ),
+              Text('$done/$total',
+                  style: const TextStyle(
+                      fontSize: 12, color: Color(0xFF6B6B70))),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: total == 0 ? null : done / total,
+              minHeight: 5,
+              backgroundColor: const Color(0xFFECECEE),
+              color: const Color(0xFF0D9488),
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        // 各文档进度项。
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [for (final it in svc.items) _docChip(it)],
+          ),
+        ),
+        const SizedBox(height: 8),
+        // 实时日志。
+        Expanded(
+          child: Container(
+            margin: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1A1A1A),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: svc.logLines.isEmpty
+                ? const Center(
+                    child: Text('准备中…',
+                        style: TextStyle(
+                            fontSize: 12, color: Color(0xFF8B8B93))))
+                : ListView.builder(
+                    controller: _logScroll,
+                    itemCount: svc.logLines.length,
+                    itemBuilder: (context, i) => Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 1),
+                      child: Text(
+                        svc.logLines[i],
+                        style: const TextStyle(
+                            fontSize: 11.5,
+                            height: 1.4,
+                            color: Color(0xFFD1D5DB),
+                            fontFamily: 'Consolas'),
+                      ),
+                    ),
+                  ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _docChip(DocGenItem it) {
+    late final Color color;
+    late final Widget leading;
+    switch (it.state) {
+      case DocGenState.pending:
+        color = const Color(0xFF9B9B9F);
+        leading = const Icon(Icons.schedule, size: 12, color: Color(0xFF9B9B9F));
+      case DocGenState.running:
+        color = const Color(0xFF0D9488);
+        leading = const SizedBox(
+          width: 11,
+          height: 11,
+          child: CircularProgressIndicator(
+              strokeWidth: 1.8, color: Color(0xFF0D9488)),
+        );
+      case DocGenState.done:
+        color = const Color(0xFF0D9488);
+        leading =
+            const Icon(Icons.check_circle, size: 12, color: Color(0xFF0D9488));
+      case DocGenState.error:
+        color = const Color(0xFFD9534F);
+        leading = const Icon(Icons.error_outline,
+            size: 12, color: Color(0xFFD9534F));
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: color.withValues(alpha: 0.25)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          leading,
+          const SizedBox(width: 5),
+          Text(it.name,
+              style: TextStyle(
+                  fontSize: 11.5, color: color, fontWeight: FontWeight.w500)),
+          if (it.state == DocGenState.running && it.chars > 0)
+            Text('  ${it.chars} 字',
+                style: const TextStyle(
+                    fontSize: 10.5, color: Color(0xFF9B9B9F))),
+        ],
+      ),
+    );
+  }
+
+  Widget _footer(BuildContext context, bool showProgress) {
+    final svc = widget.service;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+      child: Row(
+        children: [
+          if (showProgress && svc.outputDir != null)
+            TextButton.icon(
+              onPressed: () => launchUrl(Uri.file(svc.outputDir!)),
+              icon: const Icon(Icons.folder_open_outlined, size: 15),
+              label: const Text('打开输出目录', style: TextStyle(fontSize: 12.5)),
+            ),
+          const Spacer(),
+          if (_isRunningThis)
+            OutlinedButton.icon(
+              onPressed: svc.cancel,
+              style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFFD9534F)),
+              icon: const Icon(Icons.stop_circle_outlined, size: 15),
+              label: const Text('停止'),
+            )
+          else if (!showProgress) ...[
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.icon(
+              onPressed: _start,
+              style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF0D9488)),
+              icon: const Icon(Icons.auto_awesome, size: 16),
+              label: const Text('开始生成'),
+            ),
+          ] else
+            FilledButton(
+              onPressed: () => Navigator.pop(context),
+              style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF0D9488)),
+              child: const Text('完成'),
+            ),
+        ],
       ),
     );
   }

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:image/image.dart' as img;
 import 'package:markdown/markdown.dart' as md;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -11,6 +12,14 @@ import 'package:pdfrx/pdfrx.dart';
 import 'package:xml/xml.dart';
 
 import 'settings_service.dart';
+
+/// 已渲染的图（Mermaid → PNG），用于嵌入 docx。cx/cy 为显示尺寸（EMU）。
+class _DiagramImage {
+  _DiagramImage({required this.png, required this.cx, required this.cy});
+  final List<int> png;
+  final int cx;
+  final int cy;
+}
 
 class DocumentTemplate {
   const DocumentTemplate({
@@ -255,6 +264,38 @@ class DocumentService extends ChangeNotifier {
 
   DocumentTemplate templateOf(String id) =>
       templates.firstWhere((t) => t.id == id, orElse: () => templates.first);
+
+  /// 解析一个 docx / xlsx 模板文件，返回其纯文本结构（供外部按结构参考生成）。
+  Future<String> extractTemplateText(String path) async {
+    final file = File(path);
+    if (!await file.exists()) throw Exception('模板文件不存在：$path');
+    final ext = p.extension(path).toLowerCase();
+    if (ext == '.docx') return _readDocxText(file);
+    if (ext == '.xlsx') return _readXlsxTemplate(file);
+    throw Exception('模板仅支持 docx 与 xlsx 格式');
+  }
+
+  /// 把一份 Markdown 正文按中文公文/正式文档样式写成 .docx 文件。
+  /// 供项目文档生成等外部流程复用同一套排版管线。
+  Future<void> writeMarkdownToDocx({
+    required String title,
+    required String markdown,
+    required File out,
+  }) async {
+    final now = DateTime.now();
+    final draft = DocumentDraft(
+      id: 'export',
+      title: title,
+      topic: title,
+      templateId: templates.first.id,
+      content: markdown,
+      createdAt: now,
+      updatedAt: now,
+    );
+    // 项目技术文档使用常规「技术文档」排版（宋体正文/黑体标题、1.5 倍行距、
+    // 自动生成 Word 目录），并把 Mermaid 图渲染为图片嵌入，而非公文仿宋体。
+    await _writeStyledDocx(draft, out, official: false);
+  }
 
   Future<DocumentDraft> create({
     required String title,
@@ -866,7 +907,19 @@ ${draft.references.isEmpty ? '' : '参考资料如下，请优先依据这些资
     return value;
   }
 
-  Future<void> _writeStyledDocx(DocumentDraft draft, File out) async {
+  Future<void> _writeStyledDocx(
+    DocumentDraft draft,
+    File out, {
+    bool official = true,
+  }) async {
+    var markdown = draft.content;
+    // 技术文档：去掉模型手写的「目录」章节，改由 Word 目录域自动生成。
+    if (!official) markdown = _stripManualToc(markdown);
+    // 提取 Mermaid 代码块并渲染成图片（渲染失败则回退为等宽代码块展示源码）。
+    final images = <_DiagramImage>[];
+    markdown = await _extractAndRenderDiagrams(markdown, images);
+    final hasImages = images.isNotEmpty;
+
     final archive = Archive();
     archive.addFile(
       ArchiveFile.string(
@@ -875,7 +928,7 @@ ${draft.references.isEmpty ? '' : '参考资料如下，请优先依据这些资
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+${hasImages ? '  <Default Extension="png" ContentType="image/png"/>\n' : ''}  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
   <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
 </Types>''',
       ),
@@ -889,19 +942,184 @@ ${draft.references.isEmpty ? '' : '参考资料如下，请优先依据这些资
 </Relationships>''',
       ),
     );
+    final imgRels = StringBuffer();
+    for (var i = 0; i < images.length; i++) {
+      imgRels.write(
+        '<Relationship Id="rIdImg${i + 1}" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
+        'Target="media/image${i + 1}.png"/>',
+      );
+    }
     archive.addFile(
       ArchiveFile.string(
         'word/_rels/document.xml.rels',
         '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>''',
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">$imgRels</Relationships>''',
       ),
     );
-    archive.addFile(ArchiveFile.string('word/styles.xml', _docxStyles()));
     archive.addFile(
-      ArchiveFile.string('word/document.xml', _docxDocumentXml(draft)),
+      ArchiveFile.string('word/styles.xml', _docxStyles(official)),
     );
+    archive.addFile(
+      ArchiveFile.string(
+        'word/document.xml',
+        _docxDocumentXml(draft, markdown, official, images),
+      ),
+    );
+    for (var i = 0; i < images.length; i++) {
+      archive.addFile(
+        ArchiveFile.bytes('word/media/image${i + 1}.png', images[i].png),
+      );
+    }
     final bytes = ZipEncoder().encode(archive);
     await out.writeAsBytes(bytes);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mermaid 图渲染：无头 Edge/Chrome 渲染 → PNG 截图 → 裁掉白边 → 嵌入 docx
+  // ---------------------------------------------------------------------------
+
+  /// 抽取 ```mermaid 代码块，逐个渲染成 PNG。成功的用占位符 `@@DIAGRAM{n}@@`
+  /// 段落替换（后续渲染成内嵌图片）；失败的回退成普通代码块以等宽展示源码。
+  Future<String> _extractAndRenderDiagrams(
+    String markdown,
+    List<_DiagramImage> images,
+  ) async {
+    final re = RegExp(r'```mermaid[ \t]*\r?\n([\s\S]*?)```', multiLine: true);
+    final matches = re.allMatches(markdown).toList();
+    if (matches.isEmpty) return markdown;
+    final buf = StringBuffer();
+    var last = 0;
+    for (final m in matches) {
+      buf.write(markdown.substring(last, m.start));
+      last = m.end;
+      final code = (m.group(1) ?? '').trim();
+      if (code.isEmpty) continue;
+      final im = await _renderMermaidToPng(code);
+      if (im != null) {
+        images.add(im);
+        buf.write('\n\n@@DIAGRAM${images.length - 1}@@\n\n');
+      } else {
+        buf.write('\n\n```\n$code\n```\n\n');
+      }
+    }
+    buf.write(markdown.substring(last));
+    return buf.toString();
+  }
+
+  Future<_DiagramImage?> _renderMermaidToPng(String code) async {
+    final browser = _browserPath();
+    if (browser == null) return null;
+    final tmp = await Directory.systemTemp.createTemp('mind_mermaid_');
+    try {
+      final html = File(p.join(tmp.path, 'diagram.html'));
+      await html.writeAsString(_mermaidHtml(code), encoding: utf8);
+      final png = File(p.join(tmp.path, 'out.png'));
+      final result = await Process.run(
+        browser,
+        [
+          '--headless=new',
+          '--disable-gpu',
+          '--no-sandbox',
+          '--hide-scrollbars',
+          '--user-data-dir=${p.join(tmp.path, 'ud')}',
+          '--screenshot=${png.path}',
+          '--window-size=1800,1400',
+          '--force-device-scale-factor=2',
+          '--default-background-color=FFFFFFFF',
+          '--virtual-time-budget=12000',
+          '--run-all-compositor-stages-before-draw',
+          html.uri.toString(),
+        ],
+        stdoutEncoding: utf8,
+        stderrEncoding: utf8,
+      ).timeout(const Duration(seconds: 45));
+      if (result.exitCode != 0 || !await png.exists()) return null;
+      final decoded = img.decodePng(await png.readAsBytes());
+      if (decoded == null) return null;
+      final cropped = _autoCropWhite(decoded);
+      final bytes = img.encodePng(cropped);
+      // 截图用了 2x 设备像素，故每逻辑像素 = 9525/2 EMU；再限制最大显示宽度。
+      const emuPerPx = 9525 ~/ 2;
+      var cx = cropped.width * emuPerPx;
+      var cy = cropped.height * emuPerPx;
+      const maxCx = 5400000; // 约 5.9 英寸，适配 A4 正文宽度
+      if (cx > maxCx) {
+        cy = (cy * maxCx / cx).round();
+        cx = maxCx;
+      }
+      if (cx <= 0 || cy <= 0) return null;
+      return _DiagramImage(png: bytes, cx: cx, cy: cy);
+    } catch (_) {
+      return null;
+    } finally {
+      try {
+        await tmp.delete(recursive: true);
+      } catch (_) {}
+    }
+  }
+
+  static String _mermaidHtml(String code) {
+    final safe = const HtmlEscape(HtmlEscapeMode.element).convert(code);
+    return '''<!doctype html><html><head><meta charset="utf-8">
+<style>*{margin:0}html,body{background:#fff}body{display:inline-block;padding:12px}
+.mermaid{font-family:"Microsoft YaHei","SimSun",sans-serif}</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head><body><pre class="mermaid">$safe</pre>
+<script>mermaid.initialize({startOnLoad:true,securityLevel:"loose"});</script>
+</body></html>''';
+  }
+
+  /// 裁掉截图四周的白边，只保留图形本身（留少量边距）。
+  static img.Image _autoCropWhite(img.Image src) {
+    var minX = src.width, minY = src.height, maxX = 0, maxY = 0;
+    var found = false;
+    for (var y = 0; y < src.height; y++) {
+      for (var x = 0; x < src.width; x++) {
+        final px = src.getPixel(x, y);
+        if (px.r < 245 || px.g < 245 || px.b < 245) {
+          found = true;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    if (!found) return src;
+    const margin = 20;
+    minX = (minX - margin).clamp(0, src.width - 1);
+    minY = (minY - margin).clamp(0, src.height - 1);
+    maxX = (maxX + margin).clamp(0, src.width - 1);
+    maxY = (maxY + margin).clamp(0, src.height - 1);
+    return img.copyCrop(
+      src,
+      x: minX,
+      y: minY,
+      width: maxX - minX + 1,
+      height: maxY - minY + 1,
+    );
+  }
+
+  /// 去掉模型手写的「目录」章节（含其后目录项，直到下一个标题）。
+  static String _stripManualToc(String markdown) {
+    final lines = markdown.replaceAll('\r\n', '\n').split('\n');
+    final out = <String>[];
+    var skipping = false;
+    for (final line in lines) {
+      final h = RegExp(r'^(#{1,6})\s*(.+?)\s*$').firstMatch(line);
+      if (h != null) {
+        final title = h.group(2)!.replaceAll(RegExp(r'\s'), '');
+        if (title == '目录' || title == '目錄' || title.toLowerCase() == 'contents') {
+          skipping = true;
+          continue;
+        }
+        if (skipping) skipping = false; // 下一个标题即目录结束
+      }
+      if (skipping) continue;
+      out.add(line);
+    }
+    return out.join('\n');
   }
 
   // ---------------------------------------------------------------------------
@@ -1232,8 +1450,9 @@ blockquote { margin: 0; padding: 0 0 0 2em; color: #000; }
 pre { white-space: pre-wrap; word-break: break-word; line-height: 28pt; font-family: "FangSong"; }
 ''';
 
-  static String _docxStyles() =>
-      '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+  static String _docxStyles(bool official) {
+    if (official) {
+      return '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
     <w:name w:val="Normal"/>
@@ -1241,37 +1460,61 @@ pre { white-space: pre-wrap; word-break: break-word; line-height: 28pt; font-fam
     <w:rPr><w:rFonts w:ascii="FangSong" w:eastAsia="FangSong" w:hAnsi="FangSong"/><w:sz w:val="32"/></w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:pPr><w:jc w:val="center"/><w:spacing w:after="560" w:line="640" w:lineRule="exact"/><w:ind w:firstLine="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="44"/><w:rFonts w:ascii="SimSun" w:eastAsia="SimSun" w:hAnsi="SimSun"/></w:rPr></w:style>
-  <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="0" w:line="560" w:lineRule="exact"/><w:ind w:firstLine="0"/></w:pPr><w:rPr><w:rFonts w:ascii="SimHei" w:eastAsia="SimHei" w:hAnsi="SimHei"/><w:sz w:val="32"/></w:rPr></w:style>
-  <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="0" w:line="560" w:lineRule="exact"/><w:ind w:firstLine="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="KaiTi" w:eastAsia="KaiTi" w:hAnsi="KaiTi"/><w:sz w:val="32"/></w:rPr></w:style>
-  <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="0" w:line="560" w:lineRule="exact"/><w:ind w:firstLine="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="FangSong" w:eastAsia="FangSong" w:hAnsi="FangSong"/><w:sz w:val="32"/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/><w:spacing w:after="0" w:line="560" w:lineRule="exact"/><w:ind w:firstLine="0"/></w:pPr><w:rPr><w:rFonts w:ascii="SimHei" w:eastAsia="SimHei" w:hAnsi="SimHei"/><w:sz w:val="32"/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/><w:spacing w:after="0" w:line="560" w:lineRule="exact"/><w:ind w:firstLine="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="KaiTi" w:eastAsia="KaiTi" w:hAnsi="KaiTi"/><w:sz w:val="32"/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="2"/><w:spacing w:after="0" w:line="560" w:lineRule="exact"/><w:ind w:firstLine="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="FangSong" w:eastAsia="FangSong" w:hAnsi="FangSong"/><w:sz w:val="32"/></w:rPr></w:style>
   <w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="0" w:line="560" w:lineRule="exact"/><w:ind w:left="640" w:firstLine="0"/></w:pPr></w:style>
 </w:styles>''';
+    }
+    // 技术文档样式：正文宋体小四(12pt)、1.5 倍行距；各级标题黑体加粗，
+    // 并设 outlineLvl 供 Word 目录域识别。
+    return '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+    <w:name w:val="Normal"/>
+    <w:pPr><w:spacing w:after="0" w:line="360" w:lineRule="auto"/><w:ind w:firstLine="480"/></w:pPr>
+    <w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="SimSun" w:hAnsi="Times New Roman"/><w:sz w:val="24"/></w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:pPr><w:jc w:val="center"/><w:spacing w:after="360" w:line="440" w:lineRule="auto"/><w:ind w:firstLine="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="36"/><w:rFonts w:ascii="Arial" w:eastAsia="SimHei" w:hAnsi="Arial"/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/><w:spacing w:before="240" w:after="120" w:line="360" w:lineRule="auto"/><w:ind w:firstLine="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Arial" w:eastAsia="SimHei" w:hAnsi="Arial"/><w:sz w:val="30"/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/><w:spacing w:before="200" w:after="100" w:line="360" w:lineRule="auto"/><w:ind w:firstLine="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Arial" w:eastAsia="SimHei" w:hAnsi="Arial"/><w:sz w:val="26"/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="2"/><w:spacing w:before="160" w:after="80" w:line="360" w:lineRule="auto"/><w:ind w:firstLine="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Arial" w:eastAsia="SimHei" w:hAnsi="Arial"/><w:sz w:val="24"/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="0" w:line="360" w:lineRule="auto"/><w:ind w:left="480" w:firstLine="0"/></w:pPr></w:style>
+</w:styles>''';
+  }
 
-  static String _docxDocumentXml(DocumentDraft draft) {
+  static String _docxDocumentXml(
+    DocumentDraft draft,
+    String markdown,
+    bool official,
+    List<_DiagramImage> images,
+  ) {
     final nodes = md.Document(
       extensionSet: md.ExtensionSet.gitHubFlavored,
-    ).parseLines(draft.content.split('\n'));
+    ).parseLines(markdown.split('\n'));
     final buf = StringBuffer()
       ..write(
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>',
       );
-    const official = true;
 
     var titleWritten = false;
     for (final node in nodes) {
       if (!titleWritten && node is md.Element) {
         final text = _nodeText(node).trim();
         if (node.tag == 'h1' || _isOfficialTitleText(text, draft)) {
-          buf.write(_docxTitleParagraph(text, official: true));
+          buf.write(_docxTitleParagraph(text, official: official));
           titleWritten = true;
+          // 技术文档：标题后自动插入 Word 目录域。
+          if (!official) buf.write(_docxTocField());
           continue;
         }
         if (draft.title.trim().isNotEmpty) {
-          buf.write(_docxTitleParagraph(draft.title.trim(), official: true));
+          buf.write(_docxTitleParagraph(draft.title.trim(), official: official));
           titleWritten = true;
+          if (!official) buf.write(_docxTocField());
         }
       }
-      buf.write(_docxBlock(node, official: official));
+      buf.write(_docxBlock(node, official: official, images: images));
     }
     buf.write(
       '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="2098" w:right="1474" w:bottom="1984" w:left="1587"/></w:sectPr></w:body></w:document>',
@@ -1279,7 +1522,24 @@ pre { white-space: pre-wrap; word-break: break-word; line-height: 28pt; font-fam
     return buf.toString();
   }
 
-  static String _docxBlock(md.Node node, {required bool official}) {
+  /// 真实的 Word 目录域：标题居中「目 录」+ TOC 字段（打开后按 F9 / 右键更新）。
+  static String _docxTocField() {
+    return '<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:after="240" w:line="360" w:lineRule="auto"/><w:ind w:firstLine="0"/></w:pPr>'
+        '<w:r><w:rPr><w:b/><w:rFonts w:ascii="Arial" w:eastAsia="SimHei" w:hAnsi="Arial"/><w:sz w:val="30"/></w:rPr><w:t>目　录</w:t></w:r></w:p>'
+        '<w:p><w:pPr><w:spacing w:line="360" w:lineRule="auto"/><w:ind w:firstLine="0"/></w:pPr>'
+        '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+        '<w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" \\h \\z \\u </w:instrText></w:r>'
+        '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+        '<w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="SimSun" w:hAnsi="Times New Roman"/><w:sz w:val="24"/></w:rPr><w:t>（生成后在 Word 中右键“更新域”或按 F9 生成目录）</w:t></w:r>'
+        '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+        '<w:p><w:pPr><w:spacing w:after="0"/><w:ind w:firstLine="0"/></w:pPr><w:r><w:br w:type="page"/></w:r></w:p>';
+  }
+
+  static String _docxBlock(
+    md.Node node, {
+    required bool official,
+    required List<_DiagramImage> images,
+  }) {
     if (node is! md.Element) return '';
     final tag = node.tag;
     if (tag == 'h1') {
@@ -1308,6 +1568,13 @@ pre { white-space: pre-wrap; word-break: break-word; line-height: 28pt; font-fam
     }
     if (tag == 'p') {
       final text = _nodeText(node);
+      final dm = RegExp(r'^@@DIAGRAM(\d+)@@$').firstMatch(text.trim());
+      if (dm != null) {
+        final idx = int.parse(dm.group(1)!);
+        return (idx >= 0 && idx < images.length)
+            ? _docxImageParagraph(images[idx], idx)
+            : '';
+      }
       final style = official ? _officialHeadingStyleForText(text) : null;
       return _docxParagraph(
         text,
@@ -1325,21 +1592,38 @@ pre { white-space: pre-wrap; word-break: break-word; line-height: 28pt; font-fam
       );
     }
     if (tag == 'pre') {
-      return _docxParagraph(
-        _nodeText(node),
-        indent: 0,
-        firstLine: 0,
-        official: official,
-      );
+      return _docxPreformatted(_nodeText(node));
     }
     if (tag == 'ul' || tag == 'ol') {
       return _docxList(node, ordered: tag == 'ol', official: official);
     }
     if (tag == 'table') return _docxTable(node, official: official);
     return node.children
-            ?.map((child) => _docxBlock(child, official: official))
+            ?.map(
+              (child) =>
+                  _docxBlock(child, official: official, images: images),
+            )
             .join() ??
         '';
+  }
+
+  /// 内嵌图片段落（居中显示已渲染的图）。
+  static String _docxImageParagraph(_DiagramImage im, int index) {
+    final rid = 'rIdImg${index + 1}';
+    final id = 100 + index;
+    return '<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="120" w:after="120" w:line="240" w:lineRule="auto"/><w:ind w:firstLine="0"/></w:pPr>'
+        '<w:r><w:drawing>'
+        '<wp:inline distT="0" distB="0" distL="0" distR="0" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">'
+        '<wp:extent cx="${im.cx}" cy="${im.cy}"/>'
+        '<wp:effectExtent l="0" t="0" r="0" b="0"/>'
+        '<wp:docPr id="$id" name="diagram$index"/>'
+        '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+        '<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+        '<pic:nvPicPr><pic:cNvPr id="$id" name="diagram$index.png"/><pic:cNvPicPr/></pic:nvPicPr>'
+        '<pic:blipFill><a:blip r:embed="$rid" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+        '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${im.cx}" cy="${im.cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
+        '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>';
   }
 
   static String _docxList(
@@ -1416,19 +1700,48 @@ pre { white-space: pre-wrap; word-break: break-word; line-height: 28pt; font-fam
   }) {
     final safe = const HtmlEscape().convert(text);
     final styleXml = style == null ? '' : '<w:pStyle w:val="$style"/>';
-    final effectiveFirstLine = firstLine ?? (style == null ? 640 : 0);
+    final bodyFirstLine = official ? 640 : 480;
+    final effectiveFirstLine = firstLine ?? (style == null ? bodyFirstLine : 0);
     final indentXml = indent == null && effectiveFirstLine == 0
         ? ''
         : '<w:ind${indent == null ? '' : ' w:left="$indent"'} w:firstLine="$effectiveFirstLine"/>';
     final computedAfter = after == 160 ? 0 : after;
+    final line = official ? '560' : '360';
+    final lineRule = official ? 'exact' : 'auto';
     final spacingXml =
-        '<w:spacing w:after="$computedAfter" w:line="560" w:lineRule="exact"/>';
+        '<w:spacing w:after="$computedAfter" w:line="$line" w:lineRule="$lineRule"/>';
+    final bodyRunPr = official
+        ? '<w:rPr><w:rFonts w:ascii="FangSong" w:eastAsia="FangSong" w:hAnsi="FangSong"/><w:sz w:val="32"/></w:rPr>'
+        : '<w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="SimSun" w:hAnsi="Times New Roman"/><w:sz w:val="24"/></w:rPr>';
     final runPr =
-        _officialRunPrForStyle(style) ??
-        (style == null
-            ? '<w:rPr><w:rFonts w:ascii="FangSong" w:eastAsia="FangSong" w:hAnsi="FangSong"/><w:sz w:val="32"/></w:rPr>'
-            : '');
+        _runPrForStyle(style, official) ?? (style == null ? bodyRunPr : '');
     return '<w:p><w:pPr>$styleXml$spacingXml$indentXml</w:pPr><w:r>$runPr<w:t xml:space="preserve">$safe</w:t></w:r></w:p>';
+  }
+
+  /// 预格式化块（代码 / JSON / ASCII 框图）：用等宽字体、保留每一行并用
+  /// `<w:br/>` 换行，避免多行被挤成一行；CJK 用 NSimSun 等宽以让框线对齐。
+  static String _docxPreformatted(String text) {
+    final lines = text.replaceAll('\r\n', '\n').replaceAll('\t', '    ').split('\n');
+    while (lines.isNotEmpty && lines.last.trim().isEmpty) {
+      lines.removeLast();
+    }
+    while (lines.isNotEmpty && lines.first.trim().isEmpty) {
+      lines.removeAt(0);
+    }
+    if (lines.isEmpty) return '';
+    const rpr =
+        '<w:rPr><w:rFonts w:ascii="Consolas" w:eastAsia="NSimSun" w:hAnsi="Consolas" w:cs="Consolas"/><w:sz w:val="20"/></w:rPr>';
+    final runs = StringBuffer();
+    for (var i = 0; i < lines.length; i++) {
+      if (i > 0) runs.write('<w:r>$rpr<w:br/></w:r>');
+      final safe = const HtmlEscape().convert(lines[i]);
+      runs.write('<w:r>$rpr<w:t xml:space="preserve">$safe</w:t></w:r>');
+    }
+    return '<w:p><w:pPr>'
+        '<w:spacing w:before="60" w:after="120" w:line="240" w:lineRule="auto"/>'
+        '<w:ind w:left="240" w:firstLine="0"/>'
+        '<w:shd w:val="clear" w:color="auto" w:fill="F5F5F5"/>'
+        '</w:pPr>$runs</w:p>';
   }
 
   static String? _officialHeadingStyleForText(String text) {
@@ -1453,6 +1766,23 @@ pre { white-space: pre-wrap; word-break: break-word; line-height: 28pt; font-fam
     return !RegExp(r'[：:。；;，,]').hasMatch(text);
   }
 
+  static String? _runPrForStyle(String? style, bool official) {
+    if (official) return _officialRunPrForStyle(style);
+    // 技术文档：标题黑体加粗、正文/列表宋体。
+    switch (style) {
+      case 'Heading1':
+        return '<w:rPr><w:b/><w:rFonts w:ascii="Arial" w:eastAsia="SimHei" w:hAnsi="Arial"/><w:sz w:val="30"/></w:rPr>';
+      case 'Heading2':
+        return '<w:rPr><w:b/><w:rFonts w:ascii="Arial" w:eastAsia="SimHei" w:hAnsi="Arial"/><w:sz w:val="26"/></w:rPr>';
+      case 'Heading3':
+        return '<w:rPr><w:b/><w:rFonts w:ascii="Arial" w:eastAsia="SimHei" w:hAnsi="Arial"/><w:sz w:val="24"/></w:rPr>';
+      case 'ListParagraph':
+        return '<w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="SimSun" w:hAnsi="Times New Roman"/><w:sz w:val="24"/></w:rPr>';
+      default:
+        return null;
+    }
+  }
+
   static String? _officialRunPrForStyle(String? style) {
     if (style == 'Heading1') {
       return '<w:rPr><w:rFonts w:ascii="SimHei" w:eastAsia="SimHei" w:hAnsi="SimHei"/><w:sz w:val="32"/></w:rPr>';
@@ -1471,11 +1801,12 @@ pre { white-space: pre-wrap; word-break: break-word; line-height: 28pt; font-fam
 
   static String _docxTitleParagraph(String text, {required bool official}) {
     final safe = const HtmlEscape().convert(text.trim());
-    final font = official ? 'SimSun' : 'Microsoft YaHei';
-    final size = official ? 44 : 32;
-    final line = official ? 640 : 420;
+    final asciiFont = official ? 'SimSun' : 'Arial';
+    final eaFont = official ? 'SimSun' : 'SimHei';
+    final size = official ? 44 : 36;
+    final line = official ? 640 : 440;
     final after = official ? 560 : 360;
-    return '<w:p><w:pPr><w:pStyle w:val="Title"/><w:jc w:val="center"/><w:spacing w:after="$after" w:line="$line" w:lineRule="${official ? 'exact' : 'auto'}"/><w:ind w:firstLine="0"/></w:pPr><w:r><w:rPr><w:b/><w:rFonts w:ascii="$font" w:eastAsia="$font" w:hAnsi="$font"/><w:sz w:val="$size"/></w:rPr><w:t xml:space="preserve">$safe</w:t></w:r></w:p>';
+    return '<w:p><w:pPr><w:pStyle w:val="Title"/><w:jc w:val="center"/><w:spacing w:after="$after" w:line="$line" w:lineRule="${official ? 'exact' : 'auto'}"/><w:ind w:firstLine="0"/></w:pPr><w:r><w:rPr><w:b/><w:rFonts w:ascii="$asciiFont" w:eastAsia="$eaFont" w:hAnsi="$asciiFont"/><w:sz w:val="$size"/></w:rPr><w:t xml:space="preserve">$safe</w:t></w:r></w:p>';
   }
 
   static bool _isOfficialTitleText(String text, DocumentDraft draft) {
@@ -1492,12 +1823,30 @@ pre { white-space: pre-wrap; word-break: break-word; line-height: 28pt; font-fam
       value.replaceAll(RegExp(r'[\s#*_`《》“”"：:，,。.]'), '');
 
   static String _nodeText(md.Node node) {
-    if (node is md.Text) return node.text;
+    // markdown 包会把文本（尤其代码/JSON）里的 " < > & 转义成 HTML 实体，
+    // 这里取回真实字符；后续写入 XML 时再由 HtmlEscape 统一转义，避免出现
+    // 字面的 &quot; / &lt; 等。
+    if (node is md.Text) return _unescapeHtml(node.text);
     if (node is md.Element) {
       if (node.tag == 'br') return '\n';
       return (node.children ?? const <md.Node>[]).map(_nodeText).join();
     }
     return '';
+  }
+
+  /// 还原 markdown 解析产生的 HTML 实体为真实字符（& 放最后处理）。
+  static String _unescapeHtml(String s) {
+    if (!s.contains('&')) return s;
+    return s
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAll('&quot;', '"')
+        .replaceAll('&#39;', "'")
+        .replaceAll('&apos;', "'")
+        .replaceAll('&#x2F;', '/')
+        .replaceAll('&#47;', '/')
+        .replaceAll('&nbsp;', ' ')
+        .replaceAll('&amp;', '&');
   }
 
   static String _safeFileName(String value) {

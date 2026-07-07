@@ -1,3 +1,4 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
@@ -226,7 +227,7 @@ class _PaperPageState extends State<PaperPage> {
               Expanded(
                 flex: 3,
                 child: svc.activeSection == null
-                    ? _overview(draft)
+                    ? _overview(svc, draft)
                     : _PaperSectionEditor(
                         key: ValueKey(svc.activeSection!.id),
                         svc: svc,
@@ -288,12 +289,75 @@ class _PaperPageState extends State<PaperPage> {
             label: const Text('写双语稿'),
           ),
           const SizedBox(width: 8),
-          OutlinedButton.icon(
-            onPressed: svc.busy ? null : () => _export(svc),
-            icon: const Icon(Icons.ios_share, size: 15),
-            label: const Text('导出 PDF'),
+          _projectMenu(svc, draft),
+          const SizedBox(width: 8),
+          PopupMenuButton<String>(
+            enabled: !svc.busy,
+            tooltip: '导出',
+            onSelected: (v) {
+              if (v == 'pdf') _export(svc);
+              if (v == 'md') _exportMarkdown(svc);
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'pdf', child: Text('导出 PDF')),
+              PopupMenuItem(value: 'md', child: Text('导出 Markdown')),
+            ],
+            child: OutlinedButton.icon(
+              onPressed: null,
+              style: OutlinedButton.styleFrom(
+                disabledForegroundColor: svc.busy ? null : _ink,
+              ),
+              icon: const Icon(Icons.ios_share, size: 15),
+              label: const Text('导出 ▾'),
+            ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _projectMenu(PaperService svc, PaperDraft draft) {
+    final linked = draft.hasLinkedProject;
+    return PopupMenuButton<String>(
+      enabled: !svc.busy,
+      tooltip: linked ? '实验工程：${draft.linkedProjectName}' : '关联实验工程',
+      onSelected: (v) async {
+        switch (v) {
+          case 'link':
+            await _linkProject(svc);
+          case 'interpret':
+            await svc.interpretProject(draft);
+          case 'unlink':
+            await svc.setLinkedProject(null);
+            _toast('已取消关联实验工程');
+        }
+      },
+      itemBuilder: (_) => [
+        PopupMenuItem(
+          value: 'link',
+          child: Text(linked ? '重新选择实验工程' : '关联实验工程目录'),
+        ),
+        if (linked)
+          PopupMenuItem(
+            value: 'interpret',
+            child: Text(draft.projectDigest.isEmpty ? '解读工程' : '重新解读工程'),
+          ),
+        if (linked)
+          const PopupMenuItem(value: 'unlink', child: Text('取消关联')),
+      ],
+      child: OutlinedButton.icon(
+        onPressed: null,
+        style: OutlinedButton.styleFrom(
+          disabledForegroundColor: svc.busy ? null : (linked ? _accent : _ink),
+        ),
+        icon: Icon(
+          linked ? Icons.link : Icons.link_outlined,
+          size: 15,
+        ),
+        label: Text(
+          linked ? '实验工程 ▾' : '关联工程 ▾',
+          overflow: TextOverflow.ellipsis,
+        ),
       ),
     );
   }
@@ -468,7 +532,7 @@ class _PaperPageState extends State<PaperPage> {
     );
   }
 
-  Widget _overview(PaperDraft draft) {
+  Widget _overview(PaperService svc, PaperDraft draft) {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
       child: Column(
@@ -485,6 +549,8 @@ class _PaperPageState extends State<PaperPage> {
               style: const TextStyle(fontSize: 15, color: _sub, height: 1.5),
             ),
           ],
+          const SizedBox(height: 24),
+          _projectCard(svc, draft),
           const SizedBox(height: 24),
           const Text(
             '论文结构',
@@ -503,6 +569,89 @@ class _PaperPageState extends State<PaperPage> {
                 ),
               ),
             ),
+        ],
+      ),
+    );
+  }
+
+  Widget _projectCard(PaperService svc, PaperDraft draft) {
+    final linked = draft.hasLinkedProject;
+    final hasDigest = draft.projectDigest.trim().isNotEmpty;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF7F7F8),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFECECEE)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.science_outlined, size: 17, color: _accent),
+              const SizedBox(width: 8),
+              const Text(
+                '关联实验工程',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+              ),
+              const Spacer(),
+              if (!linked)
+                OutlinedButton.icon(
+                  onPressed: svc.busy ? null : () => _linkProject(svc),
+                  icon: const Icon(Icons.link, size: 15),
+                  label: const Text('关联工程目录'),
+                )
+              else
+                OutlinedButton.icon(
+                  onPressed: svc.busy ? null : () => svc.interpretProject(draft),
+                  icon: const Icon(Icons.auto_stories_outlined, size: 15),
+                  label: Text(hasDigest ? '重新解读' : '解读工程'),
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            linked
+                ? '工程目录：${draft.linkedProjectPath}'
+                : '关联该论文对应的实验工程目录后，第二大脑会读取工程真实文件，把方法、'
+                      '实验设置、结果等按真实实现落地到论文，而非泛泛而谈。',
+            style: const TextStyle(fontSize: 12.5, height: 1.5, color: _sub),
+          ),
+          if (linked) ...[
+            const SizedBox(height: 12),
+            Text(
+              hasDigest ? '工程解读' : '尚未解读（写双语稿时会自动解读一次）',
+              style: const TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+                color: _muted,
+              ),
+            ),
+            if (hasDigest) ...[
+              const SizedBox(height: 6),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0xFFECECEE)),
+                ),
+                child: MarkdownBody(
+                  data: draft.projectDigest,
+                  styleSheet: MarkdownStyleSheet(
+                    p: const TextStyle(fontSize: 12.5, height: 1.6),
+                    h2: const TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ],
         ],
       ),
     );
@@ -577,6 +726,24 @@ class _PaperPageState extends State<PaperPage> {
     } catch (e) {
       _toast('导出失败：$e');
     }
+  }
+
+  Future<void> _exportMarkdown(PaperService svc) async {
+    try {
+      final paths = await svc.exportMarkdown();
+      _toast('已导出 ${paths.length} 个 Markdown，并打开导出目录');
+    } catch (e) {
+      _toast('导出失败：$e');
+    }
+  }
+
+  Future<void> _linkProject(PaperService svc) async {
+    final dir = await FilePicker.getDirectoryPath(
+      dialogTitle: '选择该论文对应的实验工程目录',
+    );
+    if (dir == null) return;
+    await svc.setLinkedProject(dir);
+    _toast('已关联实验工程，可在「实验工程」菜单中点“解读工程”');
   }
 }
 
