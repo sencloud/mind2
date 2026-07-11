@@ -464,9 +464,11 @@ $source''',
   }
 
   /// 用 mermaid.ink 渲染 Mermaid 代码，type 支持 png / jpeg。
+  /// scale=3（需配合 width 使用）输出 3 倍像素，保证放大查看清晰。
   Future<Uint8List> _render(String code, String type) async {
     final b64 = base64Url.encode(utf8.encode(code)).replaceAll('=', '');
-    final url = 'https://mermaid.ink/img/$b64?type=$type&bgColor=white';
+    final url =
+        'https://mermaid.ink/img/$b64?type=$type&bgColor=white&width=1600&scale=3';
     final client = _client = http.Client();
     try {
       final resp = await client

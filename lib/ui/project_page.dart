@@ -50,6 +50,9 @@ class _ProjectPageState extends State<ProjectPage> {
   /// 已绑定的工程路径，切换工程时清空已打开的文件 tab。
   String? _boundProject;
 
+  /// 非空时在主工作区铺开该项目的「项目概览」工作台（保留 App 一级导航）。
+  String? _overviewPath;
+
   /// 打开一个文件为主区域 tab（已打开则只激活）。
   void _openDoc(String abs) {
     setState(() {
@@ -108,15 +111,9 @@ class _ProjectPageState extends State<ProjectPage> {
     );
   }
 
-  /// 打开「项目概览」弹窗：功能树 + 文档清单，支持在线阅读/下载/续写/修订。
-  Future<void> _openOverview(String projectPath) async {
-    await showDialog<void>(
-      context: context,
-      builder: (_) => ProjectOverviewDialog(
-        service: widget.projectDoc,
-        projectPath: projectPath,
-      ),
-    );
+  /// 在主工作区铺开「项目概览」工作台：概览/架构图/功能树/文档库/对话。
+  void _openOverview(String projectPath) {
+    setState(() => _overviewPath = projectPath);
   }
 
   /// 打开「按工程生成文档」弹窗：选择要生成的文档并实时查看进度。
@@ -205,6 +202,18 @@ class _ProjectPageState extends State<ProjectPage> {
       listenable: widget.project,
       builder: (context, _) {
         final proj = widget.project;
+        // 项目概览工作台：在主工作区内铺开（保留 App 一级导航）。
+        if (_overviewPath != null) {
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 18),
+            child: ProjectOverviewWorkspace(
+              key: ValueKey('overview:$_overviewPath'),
+              service: widget.projectDoc,
+              projectPath: _overviewPath!,
+              onBack: () => setState(() => _overviewPath = null),
+            ),
+          );
+        }
         // 未选项目：完整的引导页（标题 + 说明 + 选择器）。
         if (proj.current == null) {
           return Padding(

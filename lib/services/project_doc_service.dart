@@ -697,6 +697,411 @@ class ProjectDocService extends ChangeNotifier {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // 项目概览工作台：结构化概览、交互架构图、与项目对话
+  // ---------------------------------------------------------------------------
+
+  /// 「与项目对话」运行态。
+  bool qaBusy = false;
+
+  /// 深度分级对应的提示词描述与预算。
+  static const Map<String, String> depthLabels = {
+    'quick': '快速',
+    'standard': '标准',
+    'deep': '深入',
+    'audit': '审计',
+  };
+
+  /// 生成结构化项目概览（13 段结构 + 证据标签 + ref: 引用），存库返回。
+  Future<ProjectDocRecord> buildOverview({
+    required String projectPath,
+    String depth = 'standard',
+  }) async {
+    if (generating || detailBusy) throw StateError('已有生成任务在进行中，请稍候');
+    final rec = await store.load(projectPath);
+    if (rec.analysis.trim().isEmpty) {
+      throw StateError('尚无工程分析，请先在项目列表用“根据工程生成项目文档”完整生成一次');
+    }
+    final projectName =
+        rec.projectName.isEmpty ? p.basename(projectPath) : rec.projectName;
+    detailBusy = true;
+    detailTargetId = 'overview';
+    detailChars = 0;
+    detailPhase = '正在生成结构化概览（${depthLabels[depth] ?? depth}）…';
+    notifyListeners();
+    try {
+      final inventory = await compute(_collectPathInventory, projectPath);
+      final messages = <Map<String, dynamic>>[
+        {
+          'role': 'system',
+          'content': '你是资深软件架构分析师，产出证据优先的项目概览。只输出 Markdown 正文。',
+        },
+        {
+          'role': 'user',
+          'content': _overviewPrompt(rec.analysis, projectName, inventory, depth),
+        },
+      ];
+      final text = await _streamDoc(messages);
+      if (text.isEmpty) throw Exception('模型未返回内容');
+      rec.overviewMarkdown = text;
+      rec.depth = depth;
+      await store.save(rec);
+      return rec;
+    } finally {
+      detailBusy = false;
+      detailTargetId = null;
+      detailPhase = '';
+      notifyListeners();
+    }
+  }
+
+  String _overviewPrompt(
+    String analysis,
+    String projectName,
+    List<String> inventory,
+    String depth,
+  ) {
+    final depthRule = switch (depth) {
+      'quick' => '快速模式：每节 2-4 句，聚焦最重要结论，总长控制在 1500 字内。',
+      'deep' => '深入模式：核心模块与主流程要展开到关键类/函数级，风险按影响×概率排序。',
+      'audit' => '审计模式：以风险为先导组织内容，每个风险给出证据与整改建议。',
+      _ => '标准模式：各节均衡覆盖，重点节（架构/主流程/核心模块）展开。',
+    };
+    return '''
+请基于《工程分析》与《真实文件清单》，为工程「$projectName」生成一份**结构化项目概览**。
+
+严格按以下 13 节组织（用 ## 二级标题，节名保持一致）：
+1. 项目简介；2. 技术栈；3. 目录与关键文件；4. 启动与运行路径；5. 系统架构；
+6. 主数据/控制流；7. 核心模块；8. 状态与数据契约；9. 外部依赖；10. 测试与验证；
+11. 风险与开放问题；12. 建议下一步；13. 新人阅读路径。
+
+证据纪律（非常重要）：
+- 每个重要结论标注证据级别：【Observed】（源自工程分析/真实文件）、【Inferred】（结构推断）、【Open】（待确认）。
+- 提到具体文件时，使用 markdown 链接格式 [路径](ref:路径)，路径必须来自《真实文件清单》或工程分析中出现过的真实路径（相对工程根目录，用 / 分隔）。不得编造路径。
+- 「风险与开放问题」每条注明级别与依据。
+
+$depthRule
+
+【真实文件清单（相对路径，供引用与核对）】
+${inventory.take(400).join('\n')}
+
+【工程分析】
+${_clip(analysis, depth == 'quick' ? 8000 : 20000)}
+
+输出要求：中文 Markdown；不要开场白/结语；不要手写目录。
+''';
+  }
+
+  /// 生成/重建一张架构图（kind: system/directory/flow）：模型产出 Mermaid 与
+  /// 节点→路径映射，渲染 PNG 存盘，持久化后返回记录。
+  ///
+  /// [scopeLabel]/[scopePath] 非空时按该节点**下钻**：只画该模块/目录内部的
+  /// 架构、结构或流程，支持从根层逐层深入。
+  Future<ProjectDocRecord> buildArchitecture({
+    required String projectPath,
+    required String kind,
+    String scopeLabel = '',
+    String scopePath = '',
+  }) async {
+    if (generating || detailBusy) throw StateError('已有生成任务在进行中，请稍候');
+    final rec = await store.load(projectPath);
+    if (rec.analysis.trim().isEmpty) {
+      throw StateError('尚无工程分析，请先在项目列表用“根据工程生成项目文档”完整生成一次');
+    }
+    final projectName =
+        rec.projectName.isEmpty ? p.basename(projectPath) : rec.projectName;
+    final scopeKey = scopePath.isNotEmpty ? scopePath : scopeLabel;
+    detailBusy = true;
+    detailTargetId = 'arch:$kind:$scopeKey';
+    detailChars = 0;
+    detailPhase = scopeKey.isEmpty
+        ? '正在生成${_archKindName(kind)}…'
+        : '正在深入「${scopeLabel.isEmpty ? scopePath : scopeLabel}」生成${_archKindName(kind)}…';
+    notifyListeners();
+    try {
+      var inventory = await compute(_collectPathInventory, projectPath);
+      // 下钻到某目录时，清单聚焦到该子树（更精准、更省 token）。
+      if (scopePath.isNotEmpty) {
+        final scoped = inventory
+            .where((f) => f == scopePath || f.startsWith('$scopePath/'))
+            .toList();
+        if (scoped.isNotEmpty) inventory = scoped;
+      }
+      final messages = <Map<String, dynamic>>[
+        {
+          'role': 'system',
+          'content': '你是资深软件架构师。只输出 JSON 对象，不要解释、不要代码围栏。',
+        },
+        {
+          'role': 'user',
+          'content': _archPrompt(
+              rec.analysis, projectName, inventory, kind, scopeLabel, scopePath),
+        },
+      ];
+      final text = await _streamDoc(messages);
+      final parsed = _parseArchJson(text);
+      final mermaid = (parsed?['mermaid'] as String? ?? '').trim();
+      if (mermaid.isEmpty) throw Exception('模型未返回有效的图定义');
+      final nodes = <ArchNode>[];
+      final rawNodes = parsed?['nodes'];
+      if (rawNodes is List) {
+        final invSet = inventory.toSet();
+        for (final n in rawNodes) {
+          if (n is! Map) continue;
+          final label = (n['label'] ?? '').toString().trim();
+          var path = (n['path'] ?? '').toString().trim().replaceAll('\\', '/');
+          if (label.isEmpty) continue;
+          // 只保留真实存在的路径（文件在清单内，或目录是清单某路径的前缀）。
+          final isReal = invSet.contains(path) ||
+              inventory.any((f) => f.startsWith('$path/'));
+          if (!isReal) path = '';
+          nodes.add(ArchNode(label: label, path: path));
+        }
+      }
+      detailPhase = '正在渲染图…';
+      notifyListeners();
+      String imagePath = '';
+      final png = await documents.renderMermaidPng(mermaid);
+      if (png != null) {
+        final scopeTag = scopeKey.isEmpty
+            ? ''
+            : '_${scopeKey.hashCode.toUnsigned(32).toRadixString(16)}';
+        final out = store.assetPath(projectPath, 'arch_$kind$scopeTag.png');
+        if (out != null) {
+          await File(out).writeAsBytes(png);
+          imagePath = out;
+        }
+      }
+      final diagram = ArchDiagram(
+        kind: kind,
+        scopeLabel: scopeLabel,
+        scopePath: scopePath,
+        mermaid: mermaid,
+        imagePath: imagePath,
+        nodes: nodes,
+        updatedAt: DateTime.now(),
+      );
+      rec.diagrams
+          .removeWhere((d) => d.kind == kind && d.scopeKey == scopeKey);
+      rec.diagrams.add(diagram);
+      await store.save(rec);
+      return rec;
+    } finally {
+      detailBusy = false;
+      detailTargetId = null;
+      detailPhase = '';
+      notifyListeners();
+    }
+  }
+
+  static String _archKindName(String kind) => switch (kind) {
+        'directory' => '目录结构图',
+        'flow' => '主流程图',
+        _ => '系统架构图',
+      };
+
+  String _archPrompt(
+    String analysis,
+    String projectName,
+    List<String> inventory,
+    String kind,
+    String scopeLabel,
+    String scopePath,
+  ) {
+    final goal = switch (kind) {
+      'directory' => '目录结构图：以顶层目录/子工程为节点（graph TB），体现包含关系与职责，'
+          '节点 path 填对应目录（如 lib/services）。',
+      'flow' => '主流程图：选择系统最核心的 1 条业务/数据主流程（flowchart LR），'
+          '从输入→分发→核心逻辑→外部依赖→状态/输出，节点 path 填承载该步骤的文件。',
+      _ => '系统架构图：按分层/子系统组织（flowchart TB + subgraph），体现模块与依赖方向，'
+          '节点 path 填模块对应的目录或核心文件。',
+    };
+    final scopeName = scopeLabel.isNotEmpty ? scopeLabel : scopePath;
+    final scopeBlock = scopeName.isEmpty
+        ? ''
+        : '''
+
+【下钻聚焦（非常重要）】
+本图**只画「$scopeName」${scopePath.isEmpty ? '' : '（对应路径 $scopePath）'}这个模块内部**：
+- 拆解它的内部子模块/子目录/子步骤及相互关系，不要重复画整个系统。
+- 节点应尽量比上一层更细一级（如类/文件/子目录/子流程），便于继续逐层下钻。
+- 与外部模块的交互最多画 1-2 个边界节点即可。
+''';
+    return '''
+请基于《工程分析》与《真实文件清单》，为工程「$projectName」生成一张 **${_archKindName(kind)}**。
+
+$goal
+$scopeBlock
+
+Mermaid 语法纪律：
+- 节点 id 用英文/数字（无空格），显示文字放中括号标签内；标签含括号/冒号等特殊字符时用双引号包裹。
+- 不要 click 语句、不要样式/classDef、不要 HTML。
+- 节点数控制在 8~24 个，保证可读。
+
+只输出一个 JSON 对象（无围栏、无多余文字）：
+{"mermaid":"<mermaid 源码>","nodes":[{"label":"<图中节点显示文字>","path":"<相对路径，找不到就填空串>"}]}
+
+nodes 覆盖图中所有节点；path 必须取自《真实文件清单》（或其目录前缀），不得编造。
+
+【真实文件清单】
+${inventory.take(400).join('\n')}
+
+【工程分析】
+${_clip(analysis, 14000)}
+''';
+  }
+
+  Map<String, dynamic>? _parseArchJson(String content) {
+    try {
+      var s = content.trim();
+      if (s.startsWith('```')) {
+        s = s.replaceFirst(RegExp(r'^```[a-zA-Z]*\s*'), '');
+        if (s.endsWith('```')) s = s.substring(0, s.length - 3);
+      }
+      final start = s.indexOf('{');
+      final end = s.lastIndexOf('}');
+      if (start < 0 || end <= start) return null;
+      final data = jsonDecode(s.substring(start, end + 1));
+      return data is Map ? data.cast<String, dynamic>() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 最近一次问答所属的会话 id（供 UI 定位新建的会话）。
+  String? lastQaSessionId;
+
+  /// 「与项目对话」：Agent 在工程目录内 grep/glob/read 取证后作答，
+  /// 引用以 [路径](ref:路径) 链接给出；追加到指定会话（[sessionId] 为空或不存在
+  /// 时新建一个会话），问答历史持久化。
+  Future<ProjectDocRecord> askProject({
+    required String projectPath,
+    required String question,
+    String? sessionId,
+  }) async {
+    if (qaBusy) throw StateError('上一个问题还在回答中，请稍候');
+    final rec = await store.load(projectPath);
+    final projectName =
+        rec.projectName.isEmpty ? p.basename(projectPath) : rec.projectName;
+    qaBusy = true;
+    detailChars = 0;
+    notifyListeners();
+    try {
+      final dir = Directory(projectPath);
+      if (!await dir.exists()) throw StateError('项目目录不存在：$projectPath');
+      final buf = StringBuffer();
+      final reporter = AgentReporter(
+        onStatus: (_) {},
+        onAssistantText: (full) {
+          if (full.trim().isNotEmpty) buf.write(full);
+        },
+      );
+      final result = await _runner.run(
+        dir: dir,
+        systemPrompt: _qaSystem(projectName, rec.analysis),
+        initialMessages: [Msg.user(question)],
+        recallQuery: question,
+        reporter: reporter,
+        isCancelled: () => false,
+        enableMemory: false,
+        extractMemory: false,
+        maxTurns: 0,
+        maxDepth: 1,
+      );
+      var answer = buf.toString().trim();
+      if (answer.isEmpty) answer = _lastAssistantText(result.messages).trim();
+      if (answer.isEmpty) {
+        answer = result.reason == AgentStopReason.error
+            ? '（模型调用失败，请稍后重试）'
+            : '（未获得回答）';
+      }
+      final now = DateTime.now();
+      var session = sessionId == null ? null : rec.sessionFor(sessionId);
+      if (session == null) {
+        session = QaSession(
+          id: 'qa_${now.microsecondsSinceEpoch}',
+          title: _sessionTitle(question),
+          createdAt: now,
+        );
+        rec.qaSessions.insert(0, session);
+      }
+      session.items.add(QaItem(question: question, answer: answer, at: now));
+      session.updatedAt = now;
+      if (session.items.length == 1) session.title = _sessionTitle(question);
+      lastQaSessionId = session.id;
+      await store.save(rec);
+      return rec;
+    } finally {
+      qaBusy = false;
+      notifyListeners();
+    }
+  }
+
+  /// 删除一段对话会话。
+  Future<ProjectDocRecord> deleteQaSession({
+    required String projectPath,
+    required String sessionId,
+  }) async {
+    final rec = await store.load(projectPath);
+    rec.qaSessions.removeWhere((s) => s.id == sessionId);
+    await store.save(rec);
+    notifyListeners();
+    return rec;
+  }
+
+  static String _sessionTitle(String question) {
+    final t = question.trim().replaceAll(RegExp(r'\s+'), ' ');
+    if (t.isEmpty) return '新对话';
+    return t.length <= 20 ? t : '${t.substring(0, 20)}…';
+  }
+
+  String _qaSystem(String projectName, String analysis) => '''
+你是工程「$projectName」的代码问答助手。用户会就这个工程提问，你需要**基于真实代码**作答。
+
+可用工具（路径相对工程根目录，只读）：read_file / grep / glob。
+
+纪律：
+1. 先用 grep/glob 定位相关代码，read_file 精读后再回答；不确定的先检索，不要凭空猜。
+2. 回答里引用文件时，使用 markdown 链接 [路径](ref:路径)（相对路径、/ 分隔），可加 :行号，如 [lib/main.dart:56](ref:lib/main.dart)。引用必须是检索确认存在的真实文件。
+3. 在代码里找不到答案时，如实说明「未在代码中找到」，不得编造。
+4. 回答用中文 Markdown，简洁直接，先给结论再给依据。
+
+以下是此前生成的《工程分析》摘要，可作背景（仍以实际检索为准）：
+${_clip(analysis, 6000)}
+''';
+
+  /// 轻量收集工程内文件相对路径清单（不读内容），isolate 中执行。
+  static List<String> _collectPathInventory(String rootPath) {
+    final out = <String>[];
+    final root = Directory(rootPath);
+    void walk(Directory d, int depth) {
+      if (depth > 6 || out.length >= 800) return;
+      List<FileSystemEntity> entries;
+      try {
+        entries = d.listSync(followLinks: false);
+      } catch (_) {
+        return;
+      }
+      for (final e in entries) {
+        if (out.length >= 800) return;
+        final name = p.basename(e.path);
+        if (name.startsWith('.')) continue;
+        if (e is Directory) {
+          if (CodeIndexService.ignoreDirs.contains(name.toLowerCase())) {
+            continue;
+          }
+          walk(e, depth + 1);
+        } else if (e is File) {
+          out.add(p.relative(e.path, from: rootPath).replaceAll('\\', '/'));
+        }
+      }
+    }
+
+    walk(root, 0);
+    out.sort();
+    return out;
+  }
+
   Future<String> _streamDoc(List<Map<String, dynamic>> messages) async {
     final buf = StringBuffer();
     var last = 0;

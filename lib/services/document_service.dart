@@ -1007,6 +1007,17 @@ ${hasImages ? '  <Default Extension="png" ContentType="image/png"/>\n' : ''}  <O
     return buf.toString();
   }
 
+  /// Mermaid 截图的设备像素倍率：3x 保证放大查看依然清晰。
+  static const _mermaidScale = 3;
+
+  /// 公开包装：把一段 Mermaid 代码渲染为 PNG 字节（失败返回 null）。
+  /// 供「项目概览」架构图等场景复用 docx 的无头浏览器渲染管线。
+  Future<Uint8List?> renderMermaidPng(String code) async {
+    final im = await _renderMermaidToPng(code);
+    if (im == null) return null;
+    return Uint8List.fromList(im.png);
+  }
+
   Future<_DiagramImage?> _renderMermaidToPng(String code) async {
     final browser = _browserPath();
     if (browser == null) return null;
@@ -1024,8 +1035,8 @@ ${hasImages ? '  <Default Extension="png" ContentType="image/png"/>\n' : ''}  <O
           '--hide-scrollbars',
           '--user-data-dir=${p.join(tmp.path, 'ud')}',
           '--screenshot=${png.path}',
-          '--window-size=1800,1400',
-          '--force-device-scale-factor=2',
+          '--window-size=2200,1600',
+          '--force-device-scale-factor=$_mermaidScale',
           '--default-background-color=FFFFFFFF',
           '--virtual-time-budget=12000',
           '--run-all-compositor-stages-before-draw',
@@ -1039,8 +1050,9 @@ ${hasImages ? '  <Default Extension="png" ContentType="image/png"/>\n' : ''}  <O
       if (decoded == null) return null;
       final cropped = _autoCropWhite(decoded);
       final bytes = img.encodePng(cropped);
-      // 截图用了 2x 设备像素，故每逻辑像素 = 9525/2 EMU；再限制最大显示宽度。
-      const emuPerPx = 9525 ~/ 2;
+      // 截图用了 _mermaidScale 倍设备像素，故每逻辑像素 = 9525/scale EMU；
+      // 再限制最大显示宽度。
+      const emuPerPx = 9525 ~/ _mermaidScale;
       var cx = cropped.width * emuPerPx;
       var cy = cropped.height * emuPerPx;
       const maxCx = 5400000; // 约 5.9 英寸，适配 A4 正文宽度

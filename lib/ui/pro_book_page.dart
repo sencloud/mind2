@@ -56,7 +56,8 @@ class _ProBookPageState extends State<ProBookPage> {
     if (uri.scheme == 'http' || uri.scheme == 'https') {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 8),
-        child: Image.network(uri.toString(), fit: BoxFit.contain),
+        child: Image.network(uri.toString(),
+            fit: BoxFit.contain, filterQuality: FilterQuality.high),
       );
     }
     final path = uri.scheme == 'file'
@@ -66,7 +67,8 @@ class _ProBookPageState extends State<ProBookPage> {
     if (file.existsSync()) {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 8),
-        child: Image.file(file, fit: BoxFit.contain),
+        child: Image.file(file,
+            fit: BoxFit.contain, filterQuality: FilterQuality.high),
       );
     }
     return Text(

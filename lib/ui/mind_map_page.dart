@@ -334,7 +334,9 @@ class _MindMapPageState extends State<MindMapPage> {
             child: InteractiveViewer(
               minScale: 0.2,
               maxScale: 5,
-              child: Center(child: Image.memory(svc.image!)),
+              child: Center(
+                  child: Image.memory(svc.image!,
+                      filterQuality: FilterQuality.high)),
             ),
           ),
         ),

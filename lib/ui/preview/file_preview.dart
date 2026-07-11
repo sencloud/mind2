@@ -90,6 +90,7 @@ class FilePreview extends StatelessWidget {
             child: Image.file(
               File(file.path),
               fit: BoxFit.contain,
+              filterQuality: FilterQuality.high,
               errorBuilder: (_, _, _) => placeholder,
             ),
           ),

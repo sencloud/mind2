@@ -213,6 +213,7 @@ class FileContentView extends StatelessWidget {
             child: Image.file(
               File(absPath),
               fit: BoxFit.contain,
+              filterQuality: FilterQuality.high,
               errorBuilder: (_, _, _) => const Text('无法预览此图片'),
             ),
           ),
