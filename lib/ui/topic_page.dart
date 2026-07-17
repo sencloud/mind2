@@ -1,8 +1,11 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 
 import '../models.dart';
 import '../services/library_service.dart';
 import '../services/playwright_service.dart';
+import '../services/project_service.dart';
 import '../services/topic_service.dart';
 import 'enter_to_send.dart';
 
@@ -11,12 +14,16 @@ class TopicPage extends StatefulWidget {
     super.key,
     required this.topicService,
     required this.library,
+    this.project,
     this.onOpenReport,
     this.onOpenNote,
   });
 
   final TopicFetchService topicService;
   final LibraryService library;
+
+  /// 项目服务（桌面端），用于「挂接工程」的最近项目列表；移动端为空。
+  final ProjectService? project;
   final void Function(String reportPath)? onOpenReport;
   final void Function(StandardNote note)? onOpenNote;
 
@@ -30,6 +37,10 @@ class _TopicPageState extends State<TopicPage> {
 
   /// 正在审题/澄清（run 之前的准备阶段）。
   bool _preparing = false;
+
+  /// 本次研究挂接的本地工程绝对路径（结合工程代码/文档辅助研究），最多 5 个。
+  final List<String> _attachedProjects = [];
+  static const _maxAttachedProjects = 5;
 
   @override
   void initState() {
@@ -81,7 +92,118 @@ class _TopicPageState extends State<TopicPage> {
       return;
     }
     if (mounted) setState(() => _preparing = false);
-    await widget.topicService.run(topic, clarification: clarification);
+    await widget.topicService.run(
+      topic,
+      clarification: clarification,
+      projectPaths: List.of(_attachedProjects),
+    );
+  }
+
+  /// 弹出「挂接工程」选择：最近项目勾选 + 选择文件夹。
+  Future<void> _pickProject() async {
+    final recent = [
+      for (final path in (widget.project?.projects ?? const <String>[]))
+        if (!_attachedProjects.contains(path)) path,
+    ];
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('挂接工程（结合代码与文档辅助研究）'),
+        content: SizedBox(
+          width: 460,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (recent.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8),
+                  child: Text(
+                    '暂无最近项目，可直接选择一个工程文件夹。',
+                    style: TextStyle(fontSize: 13, color: Color(0xFF8B8B90)),
+                  ),
+                )
+              else ...[
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 6),
+                  child: Text(
+                    '最近的项目',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF6B6B70),
+                    ),
+                  ),
+                ),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 260),
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: [
+                      for (final path in recent)
+                        ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          leading: const Icon(Icons.folder_outlined, size: 18),
+                          title: Text(
+                            p.basename(path),
+                            style: const TextStyle(fontSize: 13),
+                          ),
+                          subtitle: Text(
+                            path,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 11),
+                          ),
+                          onTap: () {
+                            _addProject(path);
+                            Navigator.pop(ctx);
+                          },
+                        ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 18),
+              ],
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: () async {
+                    Navigator.pop(ctx);
+                    final dir = await FilePicker.getDirectoryPath(
+                      dialogTitle: '选择要挂接的工程文件夹',
+                    );
+                    if (dir != null && dir.isNotEmpty) _addProject(dir);
+                  },
+                  icon: const Icon(Icons.create_new_folder_outlined, size: 18),
+                  label: const Text('选择文件夹…'),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _addProject(String path) {
+    if (_attachedProjects.contains(path)) return;
+    if (_attachedProjects.length >= _maxAttachedProjects) {
+      _toast('最多挂接 $_maxAttachedProjects 个工程');
+      return;
+    }
+    setState(() => _attachedProjects.add(path));
+  }
+
+  void _removeProject(String path) {
+    setState(() => _attachedProjects.remove(path));
   }
 
   /// 弹出澄清问题对话框，收集用户答复并返回 Q/A 文本；用户取消返回 null。
@@ -546,9 +668,40 @@ class _TopicPageState extends State<TopicPage> {
                     '例如：\n我想研究高校档案智能体的安全与长期工程，重点关注准确性、知识库增强、skills 方式和可落地方案。\n（回车发送，Ctrl/Shift+回车换行）',
                 hintStyle: TextStyle(color: Color(0xFFA8A8AC)),
                 border: InputBorder.none,
-                contentPadding: EdgeInsets.fromLTRB(16, 14, 150, 54),
+                contentPadding: EdgeInsets.fromLTRB(16, 14, 150, 52),
               ),
               onChanged: (_) => setState(() {}),
+            ),
+          ),
+          // 左下角：挂接工程加号 + 已挂接工程 Chip（横向可滚动）。
+          Positioned(
+            left: 10,
+            right: 150,
+            bottom: 8,
+            child: Row(
+              children: [
+                _AddProjectButton(onTap: busy ? null : _pickProject),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
+                        for (final path in _attachedProjects)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 6),
+                            child: _ProjectChip(
+                              name: p.basename(path),
+                              tooltip: path,
+                              onDeleted:
+                                  busy ? null : () => _removeProject(path),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
           Positioned(
@@ -774,6 +927,93 @@ class _TopicPageState extends State<TopicPage> {
           ),
         );
       },
+    );
+  }
+}
+
+class _AddProjectButton extends StatelessWidget {
+  const _AddProjectButton({this.onTap});
+
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onTap != null;
+    return Tooltip(
+      message: '挂接工程（结合代码/文档辅助研究）',
+      child: Material(
+        color: Colors.transparent,
+        shape: const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Container(
+            width: 30,
+            height: 30,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(color: const Color(0xFFD9D9DD)),
+            ),
+            child: Icon(
+              Icons.add,
+              size: 18,
+              color: enabled ? const Color(0xFF49494D) : const Color(0xFFC4C4C8),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ProjectChip extends StatelessWidget {
+  const _ProjectChip({
+    required this.name,
+    required this.tooltip,
+    this.onDeleted,
+  });
+
+  final String name;
+  final String tooltip;
+  final VoidCallback? onDeleted;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(8, 4, 4, 4),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF0FBF9),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0xFFB9E8E0)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.folder_outlined, size: 14, color: Color(0xFF0D9488)),
+            const SizedBox(width: 4),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 140),
+              child: Text(
+                name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 12, color: Color(0xFF0F766E)),
+              ),
+            ),
+            if (onDeleted != null)
+              InkWell(
+                onTap: onDeleted,
+                borderRadius: BorderRadius.circular(10),
+                child: const Padding(
+                  padding: EdgeInsets.all(2),
+                  child: Icon(Icons.close, size: 13, color: Color(0xFF0D9488)),
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 }

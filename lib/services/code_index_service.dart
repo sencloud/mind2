@@ -3,15 +3,17 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
+import 'gitignore.dart';
+
 /// 工程文件扫描服务（对齐 Claude Code 的做法：**不预建语义/向量索引**）。
 ///
 /// 代码定位完全交给 Agent 用 grep / glob / read 按需检索（agentic search），
 /// 不再做切块、向量化与相似度检索。本服务只负责两件轻量的事：
 /// - 扫描工程内的代码文件清单（含 mtime），用于"本轮改动了哪些文件"的对比；
 /// - 给 Agent 生成一份顶层工程概览（目录树 + 文件数）作为初始认知。
+///
+/// 扫描时按 `.gitignore`（含嵌套）排除，并跳过常见依赖/构建目录；不设文件数上限。
 class CodeIndexService extends ChangeNotifier {
-  static const _maxFiles = 8000;
-
   /// 扫描与遍历时跳过的目录（依赖/构建产物/IDE 等噪声）。
   static const ignoreDirs = {
     '.git', '.hg', '.svn', 'node_modules', 'build', 'dist', 'out', 'target',
@@ -79,9 +81,17 @@ class CodeIndexService extends ChangeNotifier {
   }
 
   /// 顶层目录树（最多两层）+ 文件统计，作为 Agent 的初始工程概览。
-  String overview() {
-    final root = _root;
-    if (root == null) return '';
+  String overview() => _buildOverview(_root?.path, _fileCount);
+
+  /// 对任意工程根路径构建概览（独立于当前绑定的工程）。会现场扫描一次文件数，
+  /// 供「主题研究挂接工程」等按路径读取上下文的场景复用。
+  static String overviewFor(String rootPath) =>
+      _buildOverview(rootPath, _scan(rootPath).length);
+
+  /// 顶层目录树（最多两层）+ 文件统计的纯函数实现。
+  static String _buildOverview(String? rootPath, int fileCount) {
+    if (rootPath == null) return '';
+    final root = Directory(rootPath);
     final buf = StringBuffer();
     buf.writeln('工程顶层结构：');
     try {
@@ -93,20 +103,29 @@ class CodeIndexService extends ChangeNotifier {
           return p.basename(a.path).compareTo(p.basename(b.path));
         });
       var shown = 0;
+      final gi = GitIgnoreMatcher.load(root);
       for (final e in entries) {
         final name = p.basename(e.path);
         if (e is Directory) {
-          if (ignoreDirs.contains(name) || name.startsWith('.')) continue;
+          if (ignoreDirs.contains(name)) continue;
+          if (gi.isIgnored(name, isDir: true)) continue;
           buf.writeln('  $name/');
           try {
             final sub = e.listSync(followLinks: false).take(12);
             for (final s in sub) {
               final sn = p.basename(s.path);
-              if (s is Directory && ignoreDirs.contains(sn)) continue;
+              final rel = '$name/$sn';
+              if (s is Directory) {
+                if (ignoreDirs.contains(sn)) continue;
+                if (gi.isIgnored(rel, isDir: true)) continue;
+              } else if (gi.isIgnored(rel, isDir: false)) {
+                continue;
+              }
               buf.writeln('    $sn${s is Directory ? '/' : ''}');
             }
           } catch (_) {}
         } else {
+          if (gi.isIgnored(name, isDir: false)) continue;
           buf.writeln('  $name');
         }
         if (++shown >= 40) {
@@ -115,8 +134,8 @@ class CodeIndexService extends ChangeNotifier {
         }
       }
     } catch (_) {}
-    if (_fileCount > 0) {
-      buf.writeln('\n工程共约 $_fileCount 个代码文件。'
+    if (fileCount > 0) {
+      buf.writeln('\n工程共约 $fileCount 个代码文件。'
           '定位代码请用 grep（按内容/符号）与 glob（按文件名）检索，'
           '命中后用 read_file 精读对应区间，**不要逐个文件整读**。');
     }
@@ -129,21 +148,29 @@ class CodeIndexService extends ChangeNotifier {
   static Map<String, int> _scan(String rootPath) {
     final root = Directory(rootPath);
     final out = <String, int>{};
-    void walk(Directory dir) {
-      if (out.length >= _maxFiles) return;
+    final rootIgnore = GitIgnoreMatcher.load(root);
+
+    void walk(Directory dir, String relDir, GitIgnoreMatcher gi) {
       List<FileSystemEntity> entries;
       try {
         entries = dir.listSync(followLinks: false);
       } catch (_) {
         return;
       }
+      // 先加载本目录 .gitignore，再判断子项
+      final localGi =
+          relDir.isEmpty ? gi : gi.descend(dir, relDir);
+
       for (final e in entries) {
-        if (out.length >= _maxFiles) return;
         final name = p.basename(e.path);
+        final rel =
+            relDir.isEmpty ? name : '$relDir/$name';
         if (e is Directory) {
-          if (ignoreDirs.contains(name) || name.startsWith('.')) continue;
-          walk(e);
+          if (ignoreDirs.contains(name)) continue;
+          if (localGi.isIgnored(rel, isDir: true)) continue;
+          walk(e, rel, localGi);
         } else if (e is File) {
+          if (localGi.isIgnored(rel, isDir: false)) continue;
           final ext = p.extension(name).toLowerCase();
           if (!_codeExts.contains(ext)) continue;
           FileStat st;
@@ -153,14 +180,12 @@ class CodeIndexService extends ChangeNotifier {
             continue;
           }
           if (st.size == 0) continue;
-          final rel =
-              p.relative(e.path, from: rootPath).replaceAll('\\', '/');
-          out[rel] = st.modified.millisecondsSinceEpoch;
+          out[rel.replaceAll('\\', '/')] = st.modified.millisecondsSinceEpoch;
         }
       }
     }
 
-    walk(root);
+    walk(root, '', rootIgnore);
     return out;
   }
 }

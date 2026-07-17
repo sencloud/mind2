@@ -75,7 +75,8 @@ class ResearchRecord {
     required this.createdAt,
     required this.logs,
     this.reportPath,
-  });
+    List<String>? projectPaths,
+  }) : projectPaths = projectPaths ?? const [];
 
   final String id;
   final String topic;
@@ -83,12 +84,16 @@ class ResearchRecord {
   final List<String> logs;
   String? reportPath;
 
+  /// 本次研究挂接的本地工程绝对路径（用于结合工程代码/文档辅助研究）。
+  final List<String> projectPaths;
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'topic': topic,
         'createdAt': createdAt.toIso8601String(),
         'logs': logs,
         'reportPath': reportPath,
+        'projectPaths': projectPaths,
       };
 
   factory ResearchRecord.fromJson(Map<String, dynamic> json) => ResearchRecord(
@@ -97,6 +102,9 @@ class ResearchRecord {
         createdAt: DateTime.parse(json['createdAt'] as String),
         logs: (json['logs'] as List?)?.map((e) => e.toString()).toList() ?? [],
         reportPath: json['reportPath'] as String?,
+        projectPaths:
+            (json['projectPaths'] as List?)?.map((e) => e.toString()).toList() ??
+                const [],
       );
 }
 

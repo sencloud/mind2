@@ -62,7 +62,11 @@ class GrepTool extends AgentTool {
     var truncated = false;
 
     try {
-      await for (final e in walkFiles(dir, isCancelled: ctx.isCancelled)) {
+      await for (final e in walkFiles(
+        dir,
+        isCancelled: ctx.isCancelled,
+        ignoreRoot: Directory(ctx.root),
+      )) {
         if (ctx.isCancelled()) break;
         final rel = p.relative(e.path, from: base).replaceAll('\\', '/');
         if (fileRe != null && !fileRe.hasMatch(p.basename(rel))) continue;

@@ -11,6 +11,7 @@ import 'package:pdfrx/pdfrx.dart';
 import '../models.dart';
 import 'agent/memory/memory_service.dart';
 import 'agent/model_client.dart';
+import 'project_context_builder.dart';
 import 'web_reader.dart';
 import 'file_library_service.dart';
 import 'library_service.dart';
@@ -204,6 +205,13 @@ class TopicFetchService extends ChangeNotifier {
   // 研究会话归项目所有，但报告仍照常存入知识库）。
   bool _suppressHistory = false;
 
+  /// 本次研究挂接的本地工程绝对路径（用于结合工程代码/文档辅助研究）。
+  List<String> _activeProjectPaths = const [];
+
+  /// 「挂接工程」上下文构建器（懒创建，仅依赖 settings，不改 ProjectService.current）。
+  late final ProjectContextBuilder _projectContext =
+      ProjectContextBuilder(settings);
+
   /// 最近一次研究产出的报告笔记路径（供调用方关联，如项目会话）。
   String? get lastReportPath => _pendingReportPath;
 
@@ -365,12 +373,17 @@ class TopicFetchService extends ChangeNotifier {
     );
   }
 
-  Future<void> run(String topic, {String clarification = ''}) async {
+  Future<void> run(
+    String topic, {
+    String clarification = '',
+    List<String> projectPaths = const [],
+  }) async {
     if (running) return;
     running = true;
     viewing = null;
     _pendingReportPath = null;
     _lastReport = null;
+    _activeProjectPaths = List.of(projectPaths);
     _browserReadsByUrl.clear();
     _browserNotesByUrl.clear();
     _directReadUrls.clear();
@@ -379,11 +392,33 @@ class TopicFetchService extends ChangeNotifier {
     logs.clear();
     notifyListeners();
     try {
+      // 有挂接工程时，先构建工程上下文包，注入研究规划与最终报告综合。
+      var projectPack = '';
+      if (_activeProjectPaths.isNotEmpty) {
+        _log('①′ 读取挂接工程上下文（结构 / 文档 / 相关源码）…');
+        try {
+          projectPack = await _projectContext.buildPack(
+            _activeProjectPaths,
+            topic,
+            log: _log,
+          );
+        } catch (e) {
+          _log('  读取工程上下文失败（不影响后续研究）：$e');
+        }
+      }
+
       _log('① 理解研究问题并拆解调研角度…');
       if (clarification.trim().isNotEmpty) {
         _log('  已结合你的补充说明确定研究方向。');
       }
-      final plan = await _planResearch(topic, clarification);
+      if (projectPack.isNotEmpty) {
+        _log('  已结合挂接工程的现状规划检索方向。');
+      }
+      final plan = await _planResearch(
+        topic,
+        clarification,
+        projectPack: projectPack,
+      );
       final category = plan.category;
       researchTitle = plan.title;
       final angles = plan.angles;
@@ -499,6 +534,24 @@ class TopicFetchService extends ChangeNotifier {
         zoteroOn: zoteroOn,
       );
 
+      // 有挂接工程时，按外部线索回读本地代码，产出「对照工程」分析并注入报告。
+      var projectContrast = '';
+      if (_activeProjectPaths.isNotEmpty) {
+        _log('④′ 对照工程：按外部线索回读本地代码…');
+        try {
+          final digest = _buildExternalDigest(highValue, collected.excerpts);
+          projectContrast = await _projectContext.contrastAgainstProjects(
+            _activeProjectPaths,
+            topic,
+            angles,
+            digest,
+            log: _log,
+          );
+        } catch (e) {
+          _log('  对照工程失败（不影响报告主体）：$e');
+        }
+      }
+
       _log('⑤ 研读资料、综合分析并撰写研究报告…');
       if (collected.excerpts.isNotEmpty) {
         _log('  已研读 ${collected.excerpts.length} 份资料正文，开始提炼设计思想…');
@@ -510,6 +563,8 @@ class TopicFetchService extends ChangeNotifier {
         [...directExcerpts, ...collected.excerpts],
         clarification,
         highValue,
+        projectPack,
+        projectContrast,
       );
       _lastReport = report; // 暂存正文，供 deep_research 工具取回。
       final notePath = await _saveReport(
@@ -563,12 +618,37 @@ class TopicFetchService extends ChangeNotifier {
             createdAt: DateTime.now(),
             logs: List.of(logs),
             reportPath: _pendingReportPath,
+            projectPaths: List.of(_activeProjectPaths),
           ),
         );
         await _persist();
       }
+      _activeProjectPaths = const [];
       notifyListeners();
     }
+  }
+
+  /// 把外部高价值线索 + 已研读摘录压成一段简短摘要，供「对照工程」轮参考。
+  String _buildExternalDigest(
+    List<_ValuedSource> highValue,
+    List<(SourceResult, String)> excerpts,
+  ) {
+    final buf = StringBuffer();
+    if (highValue.isNotEmpty) {
+      buf.writeln('高价值资料：');
+      for (final v in highValue.take(8)) {
+        buf.writeln(
+          '- ${v.result.title}（${v.result.source.label}）：${v.reason}',
+        );
+      }
+    }
+    if (excerpts.isNotEmpty) {
+      buf.writeln('已研读要点：');
+      for (final e in excerpts.take(4)) {
+        buf.writeln('- ${e.$1.title}：${_clipForPrompt(e.$2, 300)}');
+      }
+    }
+    return buf.toString().trim();
   }
 
   /// 供 Agent（如「计划」执行器）调用的无界面主题研究：
@@ -577,6 +657,7 @@ class TopicFetchService extends ChangeNotifier {
   Future<String> researchForAgent(
     String topic, {
     String clarification = '',
+    List<String> projectPaths = const [],
     void Function(String line)? log,
     bool recordInHistory = true,
   }) async {
@@ -588,7 +669,7 @@ class TopicFetchService extends ChangeNotifier {
     _logSink = log;
     _suppressHistory = !recordInHistory;
     try {
-      await run(topic, clarification: clarification);
+      await run(topic, clarification: clarification, projectPaths: projectPaths);
     } finally {
       _logSink = null;
       _suppressHistory = false;
@@ -685,8 +766,9 @@ class TopicFetchService extends ChangeNotifier {
 
   Future<_ResearchPlan> _planResearch(
     String topic,
-    String clarification,
-  ) async {
+    String clarification, {
+    String projectPack = '',
+  }) async {
     final sourceDesc = SourceId.values
         .where((s) => s != SourceId.zotero) // Zotero 由系统自动检索，不交给 AI 规划
         .where(
@@ -711,11 +793,15 @@ class TopicFetchService extends ChangeNotifier {
     final clarifyBlock = clarification.trim().isEmpty
         ? ''
         : '\n用户已就该主题做了如下澄清/补充（务必据此确定研究方向与检索词，避免理解偏差，例如同名概念要锁定到用户所指的那一个）：\n${clarification.trim()}\n';
+    final projectBlock = projectPack.trim().isEmpty
+        ? ''
+        : '\n用户挂接了以下本地工程，本次研究的目的是结合这些工程做改进/落地对照。'
+            '请让检索方向服务于「这些工程还缺什么、可借鉴什么、如何落地」：\n${_clipForPrompt(projectPack, 6000)}\n';
     final prompt =
         '''
 你是一名研究规划专家。用户想研究以下问题：
 「$topic」
-$clarifyBlock
+$clarifyBlock$projectBlock
 可用的检索来源（只能从中选择）：
 $sourceDesc
 
@@ -2021,6 +2107,8 @@ $sourceText
     List<(SourceResult, String)> excerpts, [
     String clarification = '',
     List<_ValuedSource> highValue = const [],
+    String projectPack = '',
+    String projectContrast = '',
   ]) async {
     final buf = StringBuffer();
     var i = 0;
@@ -2071,19 +2159,25 @@ $highBuf'''}
 ${readBuf.isEmpty ? '' : '''
 C. 我已经下载并通读的资料正文摘录（这是真实读过的内容，请重点基于它做深入分析与提炼）：
 $readBuf'''}
+${projectPack.trim().isEmpty ? '' : '''
+D. 用户挂接的本地工程上下文（结构 / 文档 / 相关源码摘录），报告须落到"这些工程如何改进/落地"：
+${_clipForPrompt(projectPack, 5000)}'''}
+${projectContrast.trim().isEmpty ? '' : '''
+E. 系统对挂接工程做的"对照分析"（基于外部线索回读本地代码得出的现状/差距/可借鉴点/建议改动面）：
+$projectContrast'''}
 
 请扮演资深研究员，产出一份**有深度、有自己思考**的研究报告，而不是简单罗列摘要。要求：
 - 不要编造未出现的论文或项目；具体引用对应到上面的线索。
 - 必须从“已通读的资料正文”中提炼出可迁移的关键设计思想/创新点，并指出它们能如何组合或改进。
 - 对关键思路要做“方案尝试”式的推演：给出 2-3 条候选技术路线，分别说明其原理、前提假设、预期效果、风险，以及**如何验证**（用什么数据/指标/对照实验来检验）。
-
+${projectPack.trim().isEmpty ? '' : '- 存在挂接工程时，"与挂接工程的对照"一节必须结合材料 D/E，指出各工程的现状能力、差距、可直接复用的模块与建议落地步骤；引用到的路径/模块必须来自材料，禁止臆造。\n'}
 用中文输出 Markdown 报告，包含以下小节（二级标题 ##）：
 ## 研究问题与背景
 ## 关键概念与定义
 ## 主流方法与技术路线（横向对比优劣）
 ## 思路探索与方案尝试（2-3 条候选路线：原理 / 前提 / 预期 / 风险 / 验证方法）
 ## 从资料中提炼的设计思想（结合已通读正文，给出可迁移的关键原则与创新点，并说明如何借鉴组合）
-## 高价值资料与依据（列出最值得继续精读/手动下载/复现实验的资料，并解释价值）
+${projectPack.trim().isEmpty ? '' : '## 与挂接工程的对照（各工程的现状能力 / 差距 / 可直接复用的模块 / 建议落地步骤）\n'}## 高价值资料与依据（列出最值得继续精读/手动下载/复现实验的资料，并解释价值）
 ## 代表性论文（标注年份）
 ## 开源实现与可参考项目（仓库名与链接）
 ## 推荐实现路径（分步骤、可落地，每步注明如何验证）

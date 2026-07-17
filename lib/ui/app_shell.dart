@@ -149,6 +149,7 @@ class _AppShellState extends State<AppShell> {
       TopicPage(
         topicService: widget.topicService,
         library: widget.library,
+        project: widget.project,
         onOpenReport: (path) {
           final matches = widget.library.notes.where((n) => n.filePath == path);
           if (matches.isNotEmpty) _openNote(matches.first);
@@ -221,142 +222,147 @@ class _AppShellState extends State<AppShell> {
       curve: Curves.easeOutCubic,
       width: collapsed ? 72 : 240,
       color: const Color(0xFFF7F7F8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _DragArea(
-            child: Padding(
-              padding: EdgeInsets.fromLTRB(
-                collapsed ? 22 : 20,
-                20,
-                collapsed ? 22 : 20,
-                12,
-              ),
-              // 用横向不可滚动的 SingleChildScrollView 包裹，避免侧栏折叠/展开
-              // 动画期间（宽度在动、padding 已切换）内容瞬时放不下而报 RenderFlex 溢出。
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                physics: const NeverScrollableScrollPhysics(),
-                child: Row(
-                  mainAxisAlignment: collapsed
-                      ? MainAxisAlignment.center
-                      : MainAxisAlignment.start,
-                  children: [
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: Image.asset(
-                        'assets/icon/app_icon.png',
-                        width: 28,
-                        height: 28,
-                        fit: BoxFit.cover,
+      // 按动画中的实际宽度决定是否显示文字，避免目标状态已切换、宽度尚未到位时 Row 溢出。
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final compact = constraints.maxWidth < 160;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _DragArea(
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    compact ? 22 : 20,
+                    20,
+                    compact ? 22 : 20,
+                    12,
+                  ),
+                  child: Row(
+                    mainAxisAlignment: compact
+                        ? MainAxisAlignment.center
+                        : MainAxisAlignment.start,
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: Image.asset(
+                          'assets/icon/app_icon.png',
+                          width: 28,
+                          height: 28,
+                          fit: BoxFit.cover,
+                        ),
                       ),
-                    ),
-                    if (!collapsed) ...[
-                      const SizedBox(width: 10),
-                      // 标题 + 说明：第二大脑——自进化智能体
-                      const Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            '第二大脑',
-                            style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                            ),
+                      if (!compact) ...[
+                        const SizedBox(width: 10),
+                        const Flexible(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                '第二大脑',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              SizedBox(height: 1),
+                              Text(
+                                '自进化智能体',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 10.5,
+                                  color: Color(0xFF9B9B9F),
+                                ),
+                              ),
+                            ],
                           ),
-                          SizedBox(height: 1),
-                          Text(
-                            '自进化智能体',
-                            style: TextStyle(
-                              fontSize: 10.5,
-                              color: Color(0xFF9B9B9F),
-                            ),
-                          ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ],
-                  ],
+                  ),
                 ),
               ),
-            ),
-          ),
-          _NavItem(
-            icon: Icons.edit_square,
-            label: '新对话',
-            selected: _index == 0 && widget.chat.current == null,
-            collapsed: collapsed,
-            onTap: () {
-              widget.chat.newSession();
-              setState(() => _index = 0);
-            },
-          ),
-          _NavItem(
-            icon: Icons.travel_explore_outlined,
-            label: '主题研究',
-            selected: _index == 3,
-            collapsed: collapsed,
-            onTap: () => setState(() => _index = 3),
-          ),
-          _NavItem(
-            icon: Icons.checklist_rtl,
-            label: '计划',
-            selected: _index == 7,
-            collapsed: collapsed,
-            onTap: () => setState(() => _index = 7),
-          ),
-          _NavItem(
-            icon: Icons.auto_stories_outlined,
-            label: '写作',
-            selected: _index == 6,
-            collapsed: collapsed,
-            onTap: () => setState(() => _index = 6),
-          ),
-          _NavItem(
-            icon: Icons.code,
-            label: '项目',
-            selected: _index == 5,
-            collapsed: collapsed,
-            onTap: () => setState(() => _index = 5),
-          ),
-          _NavItem(
-            icon: Icons.menu_book_outlined,
-            label: '知识库',
-            selected: _index == 2,
-            collapsed: collapsed,
-            onTap: () => setState(() => _index = 2),
-          ),
-          _NavItem(
-            icon: Icons.hub_outlined,
-            label: '知识体系',
-            selected: _index == 1,
-            collapsed: collapsed,
-            onTap: () => setState(() => _index = 1),
-          ),
-          if (!collapsed) ...[
-            const SizedBox(height: 18),
-            const Padding(
-              padding: EdgeInsets.fromLTRB(20, 0, 20, 6),
-              child: Text(
-                '对话',
-                style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF6B6B70),
-                ),
+              _NavItem(
+                icon: Icons.edit_square,
+                label: '新对话',
+                selected: _index == 0 && widget.chat.current == null,
+                collapsed: compact,
+                onTap: () {
+                  widget.chat.newSession();
+                  setState(() => _index = 0);
+                },
               ),
-            ),
-            Expanded(child: _buildChatList()),
-          ] else
-            const Spacer(),
-          _buildSettingsRow(collapsed),
-          const SizedBox(height: 8),
-        ],
+              _NavItem(
+                icon: Icons.travel_explore_outlined,
+                label: '主题研究',
+                selected: _index == 3,
+                collapsed: compact,
+                onTap: () => setState(() => _index = 3),
+              ),
+              _NavItem(
+                icon: Icons.checklist_rtl,
+                label: '计划',
+                selected: _index == 7,
+                collapsed: compact,
+                onTap: () => setState(() => _index = 7),
+              ),
+              _NavItem(
+                icon: Icons.auto_stories_outlined,
+                label: '写作',
+                selected: _index == 6,
+                collapsed: compact,
+                onTap: () => setState(() => _index = 6),
+              ),
+              _NavItem(
+                icon: Icons.code,
+                label: '项目',
+                selected: _index == 5,
+                collapsed: compact,
+                onTap: () => setState(() => _index = 5),
+              ),
+              _NavItem(
+                icon: Icons.menu_book_outlined,
+                label: '知识库',
+                selected: _index == 2,
+                collapsed: compact,
+                onTap: () => setState(() => _index = 2),
+              ),
+              _NavItem(
+                icon: Icons.hub_outlined,
+                label: '知识体系',
+                selected: _index == 1,
+                collapsed: compact,
+                onTap: () => setState(() => _index = 1),
+              ),
+              if (!compact) ...[
+                const SizedBox(height: 18),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(20, 0, 20, 6),
+                  child: Text(
+                    '对话',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF6B6B70),
+                    ),
+                  ),
+                ),
+                Expanded(child: _buildChatList()),
+              ] else
+                const Spacer(),
+              _buildSettingsRow(collapsed, compact: compact),
+              const SizedBox(height: 8),
+            ],
+          );
+        },
       ),
     );
   }
 
-  Widget _buildSettingsRow(bool collapsed) {
+  Widget _buildSettingsRow(bool collapsed, {required bool compact}) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
       child: Row(
@@ -366,12 +372,12 @@ class _AppShellState extends State<AppShell> {
               icon: Icons.settings_outlined,
               label: '设置',
               selected: _index == 4,
-              collapsed: collapsed,
+              collapsed: compact,
               outerPadding: EdgeInsets.zero,
               onTap: () => setState(() => _index = 4),
             ),
           ),
-          if (!collapsed) const SizedBox(width: 4),
+          if (!compact) const SizedBox(width: 4),
           Tooltip(
             message: collapsed ? '展开侧边栏' : '收起侧边栏',
             child: Material(
@@ -381,7 +387,7 @@ class _AppShellState extends State<AppShell> {
                 borderRadius: BorderRadius.circular(8),
                 onTap: () => setState(() => _sidebarCollapsed = !collapsed),
                 child: SizedBox(
-                  width: collapsed ? 34 : 32,
+                  width: compact ? 34 : 32,
                   height: 34,
                   child: Icon(
                     collapsed ? Icons.chevron_right : Icons.chevron_left,
@@ -658,11 +664,15 @@ class _NavItem extends StatelessWidget {
               Icon(icon, size: 18, color: const Color(0xFF49494D)),
               if (!collapsed) ...[
                 const SizedBox(width: 10),
-                Text(
-                  label,
-                  style: const TextStyle(
-                    fontSize: 13.5,
-                    color: Color(0xFF2B2B2E),
+                Flexible(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 13.5,
+                      color: Color(0xFF2B2B2E),
+                    ),
                   ),
                 ),
               ],

@@ -275,6 +275,12 @@ class _PaperPageState extends State<PaperPage> {
             ),
           ),
           OutlinedButton.icon(
+            onPressed: svc.busy ? null : () => _chooseTopic(svc, draft),
+            icon: const Icon(Icons.lightbulb_outline, size: 15),
+            label: const Text('选择论文主题'),
+          ),
+          const SizedBox(width: 8),
+          OutlinedButton.icon(
             onPressed: svc.busy
                 ? null
                 : () => svc.generateTitleAndOutline(draft),
@@ -289,7 +295,7 @@ class _PaperPageState extends State<PaperPage> {
             label: const Text('写双语稿'),
           ),
           const SizedBox(width: 8),
-          _projectMenu(svc, draft),
+          _projectButton(svc, draft),
           const SizedBox(width: 8),
           PopupMenuButton<String>(
             enabled: !svc.busy,
@@ -316,48 +322,401 @@ class _PaperPageState extends State<PaperPage> {
     );
   }
 
-  Widget _projectMenu(PaperService svc, PaperDraft draft) {
-    final linked = draft.hasLinkedProject;
-    return PopupMenuButton<String>(
-      enabled: !svc.busy,
-      tooltip: linked ? '实验工程：${draft.linkedProjectName}' : '关联实验工程',
-      onSelected: (v) async {
-        switch (v) {
-          case 'link':
-            await _linkProject(svc);
-          case 'interpret':
-            await svc.interpretProject(draft);
-          case 'unlink':
-            await svc.setLinkedProject(null);
-            _toast('已取消关联实验工程');
-        }
-      },
-      itemBuilder: (_) => [
-        PopupMenuItem(
-          value: 'link',
-          child: Text(linked ? '重新选择实验工程' : '关联实验工程目录'),
-        ),
-        if (linked)
-          PopupMenuItem(
-            value: 'interpret',
-            child: Text(draft.projectDigest.isEmpty ? '解读工程' : '重新解读工程'),
+  Widget _projectButton(PaperService svc, PaperDraft draft) {
+    final count = draft.linkedProjects.length;
+    final linked = count > 0;
+    return OutlinedButton.icon(
+      onPressed: svc.busy ? null : () => _manageProjects(svc, draft),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: linked ? _accent : _ink,
+      ),
+      icon: Icon(linked ? Icons.link : Icons.link_outlined, size: 15),
+      label: Text(
+        linked ? '已关联 $count 个 ▾' : '关联工程 ▾',
+        overflow: TextOverflow.ellipsis,
+      ),
+    );
+  }
+
+  /// 关联工程管理弹窗：支持从最近工程或选择文件夹添加多个工程、逐个解读、移除。
+  Future<void> _manageProjects(PaperService svc, PaperDraft draft) async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 560, maxHeight: 640),
+          child: ListenableBuilder(
+            listenable: svc,
+            builder: (context, _) {
+              final linked = draft.linkedProjects;
+              final recent = svc.recentProjects
+                  .where((path) => !linked.any((e) => e.path == path))
+                  .toList();
+              return Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.science_outlined,
+                            size: 18, color: _accent),
+                        const SizedBox(width: 8),
+                        const Text(
+                          '关联工程',
+                          style: TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.w600),
+                        ),
+                        const Spacer(),
+                        IconButton(
+                          tooltip: '关闭',
+                          onPressed: () => Navigator.of(ctx).pop(),
+                          icon: const Icon(Icons.close, size: 18),
+                        ),
+                      ],
+                    ),
+                    const Text(
+                      '可关联多个工程；第二大脑会读取真实文件解读，用于推荐选题、生成结构与写稿。',
+                      style: TextStyle(fontSize: 12.5, height: 1.5, color: _sub),
+                    ),
+                    if (svc.busy) ...[
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          const SizedBox(
+                            width: 13,
+                            height: 13,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              svc.stage,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  fontSize: 12, color: Color(0xFF0F766E)),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                    const SizedBox(height: 14),
+                    Text(
+                      '已关联（${linked.length}）',
+                      style: const TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                          color: _muted),
+                    ),
+                    const SizedBox(height: 6),
+                    Flexible(
+                      child: SingleChildScrollView(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            if (linked.isEmpty)
+                              const Padding(
+                                padding: EdgeInsets.symmetric(vertical: 8),
+                                child: Text('尚未关联工程',
+                                    style: TextStyle(
+                                        fontSize: 12.5, color: _muted)),
+                              ),
+                            for (final proj in linked)
+                              _linkedProjectRow(svc, proj),
+                            const SizedBox(height: 12),
+                            Row(
+                              children: [
+                                const Text(
+                                  '添加工程',
+                                  style: TextStyle(
+                                      fontSize: 12.5,
+                                      fontWeight: FontWeight.w600,
+                                      color: _muted),
+                                ),
+                                const Spacer(),
+                                OutlinedButton.icon(
+                                  onPressed: svc.busy
+                                      ? null
+                                      : () => _pickAndAddProject(svc),
+                                  icon:
+                                      const Icon(Icons.folder_open, size: 15),
+                                  label: const Text('选择文件夹…'),
+                                ),
+                              ],
+                            ),
+                            if (recent.isNotEmpty) ...[
+                              const SizedBox(height: 6),
+                              const Text(
+                                '最近打开的工程',
+                                style:
+                                    TextStyle(fontSize: 11.5, color: _muted),
+                              ),
+                              const SizedBox(height: 4),
+                              for (final path in recent)
+                                _recentProjectRow(svc, path),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
           ),
-        if (linked)
-          const PopupMenuItem(value: 'unlink', child: Text('取消关联')),
-      ],
-      child: OutlinedButton.icon(
-        onPressed: null,
-        style: OutlinedButton.styleFrom(
-          disabledForegroundColor: svc.busy ? null : (linked ? _accent : _ink),
         ),
-        icon: Icon(
-          linked ? Icons.link : Icons.link_outlined,
-          size: 15,
+      ),
+    );
+  }
+
+  Widget _linkedProjectRow(PaperService svc, LinkedProject proj) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF7F7F8),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFECECEE)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  proj.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.w600),
+                ),
+                Text(
+                  proj.path,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11, color: _muted),
+                ),
+                Text(
+                  proj.hasDigest ? '已解读' : '未解读（写稿/选题前会自动解读）',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: proj.hasDigest ? _accent : _muted,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: proj.hasDigest ? '重新解读' : '解读工程',
+            onPressed: svc.busy
+                ? null
+                : () => svc.interpretProjects(onlyPath: proj.path),
+            icon: const Icon(Icons.auto_stories_outlined, size: 17),
+          ),
+          IconButton(
+            tooltip: '移除',
+            onPressed:
+                svc.busy ? null : () => svc.removeLinkedProject(proj.path),
+            icon: const Icon(Icons.close, size: 17),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _recentProjectRow(PaperService svc, String path) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        children: [
+          const Icon(Icons.folder_outlined, size: 15, color: _muted),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              path,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12, color: _sub),
+            ),
+          ),
+          TextButton(
+            onPressed: svc.busy ? null : () => svc.addLinkedProject(path),
+            child: const Text('添加'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _pickAndAddProject(PaperService svc) async {
+    final dir = await FilePicker.getDirectoryPath(
+      dialogTitle: '选择要关联的工程目录',
+    );
+    if (dir == null) return;
+    await svc.addLinkedProject(dir);
+  }
+
+  /// 「选择论文主题」弹窗：与关联工程交互生成候选选题，选定后驱动结构生成与写稿。
+  Future<void> _chooseTopic(PaperService svc, PaperDraft draft) async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 640, maxHeight: 660),
+          child: ListenableBuilder(
+            listenable: svc,
+            builder: (context, _) {
+              final options = draft.topicOptions;
+              return Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.lightbulb_outline,
+                            size: 18, color: _accent),
+                        const SizedBox(width: 8),
+                        const Text(
+                          '选择论文主题',
+                          style: TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.w600),
+                        ),
+                        const Spacer(),
+                        IconButton(
+                          tooltip: '关闭',
+                          onPressed: () => Navigator.of(ctx).pop(),
+                          icon: const Icon(Icons.close, size: 18),
+                        ),
+                      ],
+                    ),
+                    const Text(
+                      '与关联工程交互，生成可投稿的候选选题；选定后即可「生成结构」「写双语稿」。',
+                      style: TextStyle(fontSize: 12.5, height: 1.5, color: _sub),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        FilledButton.icon(
+                          onPressed:
+                              svc.busy ? null : () => svc.recommendTopics(draft),
+                          style: FilledButton.styleFrom(
+                              backgroundColor: _accent),
+                          icon: const Icon(Icons.auto_awesome, size: 15),
+                          label: Text(
+                              options.isEmpty ? '与工程交互生成推荐' : '重新推荐'),
+                        ),
+                        const SizedBox(width: 12),
+                        if (svc.busy)
+                          const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                        if (svc.busy) const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            svc.busy
+                                ? svc.stage
+                                : (draft.hasLinkedProject
+                                    ? '已关联 ${draft.linkedProjects.length} 个工程'
+                                    : '未关联工程，将仅依据来源研究报告'),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                fontSize: 12, color: _muted),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Flexible(
+                      child: options.isEmpty
+                          ? const Center(
+                              child: Padding(
+                                padding: EdgeInsets.symmetric(vertical: 24),
+                                child: Text(
+                                  '点击上方按钮，让第二大脑结合工程生成候选选题',
+                                  style: TextStyle(
+                                      fontSize: 12.5, color: _muted),
+                                ),
+                              ),
+                            )
+                          : SingleChildScrollView(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  for (final option in options)
+                                    _topicOptionCard(ctx, svc, option),
+                                ],
+                              ),
+                            ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
         ),
-        label: Text(
-          linked ? '实验工程 ▾' : '关联工程 ▾',
-          overflow: TextOverflow.ellipsis,
-        ),
+      ),
+    );
+  }
+
+  Widget _topicOptionCard(
+    BuildContext ctx,
+    PaperService svc,
+    PaperTopicOption option,
+  ) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF7F7F8),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFECECEE)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            option.titleZh,
+            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+          ),
+          if (option.titleEn.isNotEmpty) ...[
+            const SizedBox(height: 3),
+            Text(
+              option.titleEn,
+              style: const TextStyle(
+                  fontSize: 12, color: _sub, fontStyle: FontStyle.italic),
+            ),
+          ],
+          if (option.summary.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              option.summary,
+              style: const TextStyle(fontSize: 12.5, height: 1.55, color: _sub),
+            ),
+          ],
+          const SizedBox(height: 10),
+          Align(
+            alignment: Alignment.centerRight,
+            child: FilledButton(
+              onPressed: svc.busy
+                  ? null
+                  : () async {
+                      await svc.selectTopic(option);
+                      if (ctx.mounted) Navigator.of(ctx).pop();
+                      _toast('已选定主题，可点击「生成结构」或「写双语稿」');
+                    },
+              style: FilledButton.styleFrom(backgroundColor: _accent),
+              child: const Text('选用此主题'),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -575,8 +934,7 @@ class _PaperPageState extends State<PaperPage> {
   }
 
   Widget _projectCard(PaperService svc, PaperDraft draft) {
-    final linked = draft.hasLinkedProject;
-    final hasDigest = draft.projectDigest.trim().isNotEmpty;
+    final linked = draft.linkedProjects;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
@@ -592,65 +950,82 @@ class _PaperPageState extends State<PaperPage> {
             children: [
               const Icon(Icons.science_outlined, size: 17, color: _accent),
               const SizedBox(width: 8),
-              const Text(
-                '关联实验工程',
-                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+              Text(
+                '关联工程（${linked.length}）',
+                style: const TextStyle(
+                    fontSize: 14, fontWeight: FontWeight.w600),
               ),
               const Spacer(),
-              if (!linked)
-                OutlinedButton.icon(
-                  onPressed: svc.busy ? null : () => _linkProject(svc),
-                  icon: const Icon(Icons.link, size: 15),
-                  label: const Text('关联工程目录'),
-                )
-              else
-                OutlinedButton.icon(
-                  onPressed: svc.busy ? null : () => svc.interpretProject(draft),
-                  icon: const Icon(Icons.auto_stories_outlined, size: 15),
-                  label: Text(hasDigest ? '重新解读' : '解读工程'),
-                ),
+              OutlinedButton.icon(
+                onPressed: svc.busy ? null : () => _manageProjects(svc, draft),
+                icon: const Icon(Icons.tune, size: 15),
+                label: const Text('管理关联工程'),
+              ),
             ],
           ),
           const SizedBox(height: 8),
-          Text(
-            linked
-                ? '工程目录：${draft.linkedProjectPath}'
-                : '关联该论文对应的实验工程目录后，第二大脑会读取工程真实文件，把方法、'
-                      '实验设置、结果等按真实实现落地到论文，而非泛泛而谈。',
-            style: const TextStyle(fontSize: 12.5, height: 1.5, color: _sub),
-          ),
-          if (linked) ...[
-            const SizedBox(height: 12),
-            Text(
-              hasDigest ? '工程解读' : '尚未解读（写双语稿时会自动解读一次）',
-              style: const TextStyle(
-                fontSize: 12.5,
-                fontWeight: FontWeight.w600,
-                color: _muted,
-              ),
-            ),
-            if (hasDigest) ...[
-              const SizedBox(height: 6),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: const Color(0xFFECECEE)),
+          if (linked.isEmpty)
+            const Text(
+              '关联该论文对应的实验/代码工程（可多选）后，第二大脑会读取工程真实文件，'
+              '据此推荐选题、生成结构，并把方法、实验设置、结果等按真实实现落地到论文。',
+              style: TextStyle(fontSize: 12.5, height: 1.5, color: _sub),
+            )
+          else
+            for (final proj in linked) _projectDigestBlock(proj),
+        ],
+      ),
+    );
+  }
+
+  Widget _projectDigestBlock(LinkedProject proj) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.folder_outlined, size: 14, color: _accent),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  proj.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.w600),
                 ),
-                child: MarkdownBody(
-                  data: draft.projectDigest,
-                  styleSheet: MarkdownStyleSheet(
-                    p: const TextStyle(fontSize: 12.5, height: 1.6),
-                    h2: const TextStyle(
-                      fontSize: 13.5,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
+              ),
+              Text(
+                proj.hasDigest ? '已解读' : '未解读',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: proj.hasDigest ? _accent : _muted,
                 ),
               ),
             ],
+          ),
+          if (proj.hasDigest) ...[
+            const SizedBox(height: 6),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFECECEE)),
+              ),
+              child: MarkdownBody(
+                data: proj.digest,
+                styleSheet: MarkdownStyleSheet(
+                  p: const TextStyle(fontSize: 12.5, height: 1.6),
+                  h2: const TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
           ],
         ],
       ),
@@ -737,14 +1112,6 @@ class _PaperPageState extends State<PaperPage> {
     }
   }
 
-  Future<void> _linkProject(PaperService svc) async {
-    final dir = await FilePicker.getDirectoryPath(
-      dialogTitle: '选择该论文对应的实验工程目录',
-    );
-    if (dir == null) return;
-    await svc.setLinkedProject(dir);
-    _toast('已关联实验工程，可在「实验工程」菜单中点“解读工程”');
-  }
 }
 
 class _PaperSectionEditor extends StatefulWidget {

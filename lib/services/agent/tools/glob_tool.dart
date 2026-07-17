@@ -43,7 +43,11 @@ class GlobTool extends AgentTool {
     final matches = <String>[];
     var truncated = false;
     try {
-      await for (final e in walkFiles(dir, isCancelled: ctx.isCancelled)) {
+      await for (final e in walkFiles(
+        dir,
+        isCancelled: ctx.isCancelled,
+        ignoreRoot: Directory(ctx.root),
+      )) {
         if (ctx.isCancelled()) break;
         final rel = p.relative(e.path, from: base).replaceAll('\\', '/');
         if (re.hasMatch(rel)) {

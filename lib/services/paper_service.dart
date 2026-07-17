@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../models.dart';
 import 'code_index_service.dart';
+import 'project_service.dart';
 import 'settings_service.dart';
 
 enum PaperFormat {
@@ -75,6 +76,53 @@ class PaperSection {
   );
 }
 
+/// 关联的实验/代码工程（真实工程目录 + 对其的解读摘要）。
+class LinkedProject {
+  LinkedProject({required this.path, this.digest = ''});
+
+  final String path;
+
+  /// 对该工程的解读摘要（基于真实文件生成），注入方法/实验/相关工作写作。
+  String digest;
+
+  String get name => path.isEmpty ? '' : p.basename(path);
+  bool get hasDigest => digest.trim().isNotEmpty;
+
+  Map<String, dynamic> toJson() => {'path': path, 'digest': digest};
+
+  factory LinkedProject.fromJson(Map<String, dynamic> json) => LinkedProject(
+    path: json['path'] as String? ?? '',
+    digest: json['digest'] as String? ?? '',
+  );
+}
+
+/// 一个由「与工程交互」推荐出的论文选题候选：中英文题目 + 相关信息（研究问题、
+/// 创新点、可用的工程支撑、关键词），供用户选择后驱动结构生成与写稿。
+class PaperTopicOption {
+  PaperTopicOption({
+    required this.titleZh,
+    required this.titleEn,
+    this.summary = '',
+  });
+
+  final String titleZh;
+  final String titleEn;
+  final String summary;
+
+  Map<String, dynamic> toJson() => {
+    'titleZh': titleZh,
+    'titleEn': titleEn,
+    'summary': summary,
+  };
+
+  factory PaperTopicOption.fromJson(Map<String, dynamic> json) =>
+      PaperTopicOption(
+        titleZh: json['titleZh'] as String? ?? '',
+        titleEn: json['titleEn'] as String? ?? '',
+        summary: json['summary'] as String? ?? '',
+      );
+}
+
 class PaperDraft {
   PaperDraft({
     required this.id,
@@ -86,10 +134,13 @@ class PaperDraft {
     required this.sourceBody,
     required this.createdAt,
     required this.updatedAt,
-    this.linkedProjectPath = '',
-    this.projectDigest = '',
+    List<LinkedProject>? linkedProjects,
+    List<PaperTopicOption>? topicOptions,
+    this.topicBrief = '',
     List<PaperSection>? sections,
-  }) : sections = sections ?? [];
+  })  : linkedProjects = linkedProjects ?? [],
+        topicOptions = topicOptions ?? [],
+        sections = sections ?? [];
 
   final String id;
   String titleZh;
@@ -102,16 +153,20 @@ class PaperDraft {
   DateTime updatedAt;
   List<PaperSection> sections;
 
-  /// 关联的实验工程目录（真实代码工程），用于解读并把真实实现落地进论文。
-  String linkedProjectPath;
+  /// 关联的实验/代码工程（可多选），用于解读并把真实实现落地进论文。
+  List<LinkedProject> linkedProjects;
 
-  /// 对关联实验工程的解读摘要（基于真实文件生成），注入方法/实验/相关工作写作。
-  String projectDigest;
+  /// 最近一次「与工程交互」推荐出的选题候选（供用户选择）。
+  List<PaperTopicOption> topicOptions;
 
-  String get linkedProjectName =>
-      linkedProjectPath.isEmpty ? '' : p.basename(linkedProjectPath);
+  /// 用户选定选题后的「相关信息」（研究问题/创新点/工程支撑），指导结构生成与写作。
+  String topicBrief;
 
-  bool get hasLinkedProject => linkedProjectPath.trim().isNotEmpty;
+  bool get hasLinkedProject => linkedProjects.isNotEmpty;
+
+  /// 所有关联工程的名字（用于顶栏/卡片展示）。
+  String get linkedProjectNames =>
+      linkedProjects.map((e) => e.name).where((e) => e.isNotEmpty).join('、');
 
   int get doneSections => sections.where((s) => s.hasContent).length;
   int get totalWords => sections.fold(0, (sum, section) => sum + section.words);
@@ -126,8 +181,9 @@ class PaperDraft {
     'sourceBody': sourceBody,
     'createdAt': createdAt.toIso8601String(),
     'updatedAt': updatedAt.toIso8601String(),
-    'linkedProjectPath': linkedProjectPath,
-    'projectDigest': projectDigest,
+    'linkedProjects': linkedProjects.map((e) => e.toJson()).toList(),
+    'topicOptions': topicOptions.map((e) => e.toJson()).toList(),
+    'topicBrief': topicBrief,
     'sections': sections.map((section) => section.toJson()).toList(),
   };
 
@@ -143,8 +199,15 @@ class PaperDraft {
         DateTime.tryParse(json['createdAt'] as String? ?? '') ?? DateTime.now(),
     updatedAt:
         DateTime.tryParse(json['updatedAt'] as String? ?? '') ?? DateTime.now(),
-    linkedProjectPath: json['linkedProjectPath'] as String? ?? '',
-    projectDigest: json['projectDigest'] as String? ?? '',
+    linkedProjects: ((json['linkedProjects'] as List?) ?? [])
+        .whereType<Map>()
+        .map((e) => LinkedProject.fromJson(e.cast<String, dynamic>()))
+        .toList(),
+    topicOptions: ((json['topicOptions'] as List?) ?? [])
+        .whereType<Map>()
+        .map((e) => PaperTopicOption.fromJson(e.cast<String, dynamic>()))
+        .toList(),
+    topicBrief: json['topicBrief'] as String? ?? '',
     sections: ((json['sections'] as List?) ?? [])
         .whereType<Map>()
         .map(
@@ -155,9 +218,15 @@ class PaperDraft {
 }
 
 class PaperService extends ChangeNotifier {
-  PaperService(this.settings);
+  PaperService(this.settings, {this.project});
 
   final SettingsService settings;
+
+  /// 项目服务（桌面端），用于「关联工程」时列出最近打开的工程；移动端为空。
+  final ProjectService? project;
+
+  /// 最近打开过的工程路径（供关联工程时快速选择）。
+  List<String> get recentProjects => project?.projects ?? const [];
 
   final List<PaperDraft> papers = [];
   PaperDraft? current;
@@ -267,11 +336,102 @@ class PaperService extends ChangeNotifier {
     await _persist();
   }
 
+  /// 「选择论文主题」：与关联工程交互（先补齐解读），综合工程实现与来源研究，
+  /// 生成若干可投稿的候选选题（中英题目 + 相关信息），写入 draft.topicOptions。
+  Future<void> recommendTopics([PaperDraft? target]) async {
+    final draft = target ?? current;
+    if (draft == null || busy) return;
+    if (!draft.hasLinkedProject && draft.sourceBody.trim().isEmpty) {
+      stage = '请先关联工程或从研究报告创建，才能推荐选题';
+      notifyListeners();
+      return;
+    }
+    _begin('正在与工程交互、生成推荐选题…');
+    try {
+      await _ensureDigests(draft);
+      if (_cancel) return;
+      stage = '正在综合工程与研究，拟定候选选题…';
+      notifyListeners();
+      final options = await _planTopics(draft);
+      if (_cancel) return;
+      draft.topicOptions = options;
+      draft.updatedAt = DateTime.now();
+      stage = options.isEmpty ? '未能生成候选选题' : '已生成 ${options.length} 个候选选题，请选择';
+      await _persist();
+    } catch (e) {
+      stage = _cancel ? '已停止' : '推荐选题失败：$e';
+    } finally {
+      _end();
+    }
+  }
+
+  /// 选定一个候选选题：写入中英文题目，并把「相关信息」作为后续结构生成/写作的约束。
+  Future<void> selectTopic(PaperTopicOption option, [PaperDraft? target]) async {
+    final draft = target ?? current;
+    if (draft == null) return;
+    if (option.titleZh.trim().isNotEmpty) draft.titleZh = option.titleZh.trim();
+    if (option.titleEn.trim().isNotEmpty) draft.titleEn = option.titleEn.trim();
+    draft.topicBrief = option.summary.trim();
+    draft.updatedAt = DateTime.now();
+    notifyListeners();
+    await _persist();
+  }
+
+  Future<List<PaperTopicOption>> _planTopics(PaperDraft draft) async {
+    final projectBlock = _combinedProjectDigest(draft, 12000);
+    final reply = await _chat([
+      {
+        'role': 'system',
+        'content':
+            '你是资深 SCI 期刊选题顾问。你结合真实工程实现与研究报告，给出可投稿、'
+            '有明确创新点、且能被工程真实支撑的论文选题。只输出 JSON，不要解释。',
+      },
+      {
+        'role': 'user',
+        'content':
+            '''
+请结合下面的「关联工程真实解读」与「来源研究报告」（可能为空），为一篇可投稿的 SCI 期刊论文推荐 4-6 个候选选题（题目）。
+要求：
+- 每个选题必须能被关联工程的真实实现支撑（方法/实验/数据），突出创新点与研究问题，避免泛泛而谈；
+- 给出具体、学术、可投稿的中文题目与英文题目；
+- summary 用中文写清四点：研究问题、核心创新点、可用的工程支撑（对应到工程里的模块/方法/实验）、建议关键词。
+
+严格输出 JSON：
+{"topics":[{"titleZh":"...","titleEn":"...","summary":"研究问题：… 创新点：… 工程支撑：… 关键词：…"}]}
+
+关联工程真实解读：
+${projectBlock.isEmpty ? '（无）' : projectBlock}
+
+来源研究报告标题：${draft.sourceResearchTitle.isEmpty ? '（无）' : draft.sourceResearchTitle}
+来源研究报告正文：
+${draft.sourceBody.trim().isEmpty ? '（无）' : _clip(draft.sourceBody, 8000)}
+''',
+      },
+    ], jsonMode: true);
+    final obj = _parseJson(reply);
+    final out = <PaperTopicOption>[];
+    for (final raw in ((obj['topics'] as List?) ?? []).whereType<Map>()) {
+      final zh = (raw['titleZh'] ?? '').toString().trim();
+      final en = (raw['titleEn'] ?? '').toString().trim();
+      if (zh.isEmpty && en.isEmpty) continue;
+      out.add(
+        PaperTopicOption(
+          titleZh: zh,
+          titleEn: en,
+          summary: (raw['summary'] ?? '').toString().trim(),
+        ),
+      );
+    }
+    return out;
+  }
+
   Future<void> generateTitleAndOutline([PaperDraft? target]) async {
     final draft = target ?? current;
     if (draft == null || busy) return;
     _begin('正在拟定 SCI 论文题目与结构…');
     try {
+      await _ensureDigests(draft);
+      if (_cancel) return;
       await _planPaper(draft);
       stage = '题目与结构已生成';
     } catch (e) {
@@ -290,13 +450,8 @@ class PaperService extends ChangeNotifier {
         await _planPaper(draft);
       }
       if (_cancel) return;
-      // 关联了实验工程但尚未解读：先解读，确保方法/实验设置能引用真实实现。
-      if (draft.hasLinkedProject && draft.projectDigest.trim().isEmpty) {
-        stage = '正在解读关联实验工程…';
-        notifyListeners();
-        draft.projectDigest = await _buildProjectDigest(draft);
-        await _persist();
-      }
+      // 关联了工程但尚未解读：先逐个解读，确保方法/实验设置能引用真实实现。
+      await _ensureDigests(draft);
       if (_cancel) return;
       final total = draft.sections.length;
       for (var i = 0; i < draft.sections.length; i++) {
@@ -324,59 +479,81 @@ class PaperService extends ChangeNotifier {
     }
   }
 
-  /// 关联 / 取消关联实验工程目录。切换工程会清空旧的解读摘要。
-  Future<void> setLinkedProject(String? path) async {
+  /// 追加一个关联工程（去重）。不影响其它工程已有的解读摘要。
+  Future<void> addLinkedProject(String path) async {
     final draft = current;
     if (draft == null) return;
-    final normalized = (path ?? '').trim();
-    if (draft.linkedProjectPath == normalized) return;
-    draft.linkedProjectPath = normalized;
-    draft.projectDigest = '';
+    final normalized = path.trim();
+    if (normalized.isEmpty) return;
+    if (draft.linkedProjects.any((e) => e.path == normalized)) return;
+    draft.linkedProjects.add(LinkedProject(path: normalized));
     draft.updatedAt = DateTime.now();
     notifyListeners();
     await _persist();
   }
 
-  /// 解读关联的实验工程：读取工程内真实文件（README、依赖清单、训练/模型/
-  /// 实验/配置等源码），调用模型提炼方法与实验设置的真实摘要，缓存到
-  /// draft.projectDigest，供各章节写作直接引用、真实落地到论文。
-  Future<void> interpretProject([PaperDraft? target]) async {
-    final draft = target ?? current;
+  /// 移除一个关联工程。
+  Future<void> removeLinkedProject(String path) async {
+    final draft = current;
+    if (draft == null) return;
+    draft.linkedProjects.removeWhere((e) => e.path == path);
+    draft.updatedAt = DateTime.now();
+    notifyListeners();
+    await _persist();
+  }
+
+  /// 解读关联工程：读取工程内真实文件（README、依赖清单、训练/模型/实验/配置等
+  /// 源码），调用模型提炼方法与实验设置的真实摘要，缓存到各工程的 digest，供各章节
+  /// 写作直接引用、真实落地到论文。[onlyPath] 为空时解读全部（缺解读的优先）。
+  Future<void> interpretProjects({String? onlyPath}) async {
+    final draft = current;
     if (draft == null || busy) return;
     if (!draft.hasLinkedProject) {
-      stage = '尚未关联实验工程';
+      stage = '尚未关联工程';
       notifyListeners();
       return;
     }
-    _begin('正在解读实验工程…');
+    _begin('正在解读关联工程…');
     try {
-      final digest = await _buildProjectDigest(draft);
-      if (_cancel) return;
-      draft.projectDigest = digest;
-      draft.updatedAt = DateTime.now();
-      stage = '实验工程解读完成';
-      await _persist();
+      final targets = onlyPath == null
+          ? draft.linkedProjects
+          : draft.linkedProjects.where((e) => e.path == onlyPath).toList();
+      for (final proj in targets) {
+        if (_cancel) break;
+        stage = '正在解读工程：${proj.name}…';
+        notifyListeners();
+        proj.digest = await _buildProjectDigest(draft, proj.path);
+        draft.updatedAt = DateTime.now();
+        await _persist();
+      }
+      stage = _cancel ? '已停止' : '工程解读完成';
     } catch (e) {
-      stage = _cancel ? '已停止' : '解读实验工程失败：$e';
+      stage = _cancel ? '已停止' : '解读工程失败：$e';
     } finally {
       _end();
     }
   }
 
-  Future<String> _buildProjectDigest(PaperDraft draft) async {
-    final dir = Directory(draft.linkedProjectPath);
-    if (!await dir.exists()) {
-      throw Exception('实验工程目录不存在：${draft.linkedProjectPath}');
+  /// 为所有尚未解读的关联工程补齐 digest（供写稿/选题/结构生成前调用）。
+  /// 不自行 _begin/_end，交由调用方管理 busy 状态。
+  Future<void> _ensureDigests(PaperDraft draft) async {
+    for (final proj in draft.linkedProjects) {
+      if (_cancel) break;
+      if (proj.hasDigest) continue;
+      stage = '正在解读关联工程：${proj.name}…';
+      notifyListeners();
+      proj.digest = await _buildProjectDigest(draft, proj.path);
+      await _persist();
     }
-    stage = '正在收集工程文件…';
-    notifyListeners();
-    final context = await compute(
-      _collectProjectContext,
-      draft.linkedProjectPath,
-    );
+  }
+
+  Future<String> _buildProjectDigest(PaperDraft draft, String projectPath) async {
+    final dir = Directory(projectPath);
+    if (!await dir.exists()) {
+      throw Exception('工程目录不存在：$projectPath');
+    }
+    final context = await compute(_collectProjectContext, projectPath);
     if (context.trim().isEmpty) throw Exception('工程内未找到可解读的文件');
-    stage = '正在提炼工程的方法与实验设置…';
-    notifyListeners();
     final reply = await _chat([
       {
         'role': 'system',
@@ -582,29 +759,40 @@ $context
   Future<void> _planPaper(PaperDraft draft) async {
     stage = '正在拟定 SCI 论文题目与章节结构…';
     notifyListeners();
+    final projectBlock = _combinedProjectDigest(draft, 10000);
+    final hasChosenTitle = draft.titleZh.trim().isNotEmpty &&
+        draft.titleZh.trim() != '未命名论文' &&
+        !draft.titleZh.startsWith('论文草稿：');
+    final titleRule = hasChosenTitle
+        ? '- 用户已选定题目，请沿用（可仅做措辞润色）：中文「${draft.titleZh}」；英文「${draft.titleEn}」。'
+        : '- 题目应具体、学术、可投稿，避免泛泛而谈。';
     final reply = await _chat([
       {
         'role': 'system',
-        'content': '你是资深 SCI 期刊论文编辑，擅长把研究报告改写成标准期刊论文。只输出 JSON，不要解释。',
+        'content': '你是资深 SCI 期刊论文编辑，擅长结合真实工程实现与研究报告规划标准期刊论文。只输出 JSON，不要解释。',
       },
       {
         'role': 'user',
         'content':
             '''
-请根据下面的研究报告，拟定一个适合 SCI 期刊论文的中文题目、英文题目，并规划论文结构。
+请结合下面的材料，拟定一个适合 SCI 期刊论文的中文题目、英文题目，并规划论文结构。
 
 要求：
-- 题目应具体、学术、可投稿，避免泛泛而谈。
+$titleRule
+- 结构与各节写作要点要贴合关联工程的真实实现（方法、实验设置、结果应可由工程支撑），不要空泛。
 - sections 必须覆盖标准 SCI 论文套路：摘要、关键词、引言、相关工作、方法或框架、实验或评价、结果、讨论、结论、参考文献。
-- 每个 section 给出 zhTitle、enTitle、brief。
+- 每个 section 给出 zhTitle、enTitle、brief（brief 用中文写清本节要点，并尽量点到可用的工程支撑）。
 
 严格输出 JSON：
 {"titleZh":"...","titleEn":"...","sections":[{"zhTitle":"摘要","enTitle":"Abstract","brief":"本节写作要点"}]}
+${draft.topicBrief.trim().isEmpty ? '' : '\n选定选题的相关信息（研究问题/创新点/工程支撑/关键词）：\n${_clip(draft.topicBrief, 2000)}\n'}
+关联工程真实解读：
+${projectBlock.isEmpty ? '（无）' : projectBlock}
 
-研究报告标题：${draft.sourceResearchTitle}
+研究报告标题：${draft.sourceResearchTitle.isEmpty ? '（无）' : draft.sourceResearchTitle}
 
 研究报告正文：
-${_clip(draft.sourceBody, 18000)}
+${draft.sourceBody.trim().isEmpty ? '（无）' : _clip(draft.sourceBody, 14000)}
 ''',
       },
     ], jsonMode: true);
@@ -720,6 +908,22 @@ ${_clip(draft.sourceBody, 18000)}
     return 'You are a rigorous SCI journal paper writing assistant. Output only the English $syntax content for the requested section. Do not explain and do not wrap it in code fences.';
   }
 
+  /// 把所有关联工程的解读拼成一段（每工程以 `## 工程：{name}` 分隔），总量封顶。
+  String _combinedProjectDigest(PaperDraft draft, int maxTotal) {
+    final withDigest =
+        draft.linkedProjects.where((e) => e.hasDigest).toList();
+    if (withDigest.isEmpty) return '';
+    final perProject = (maxTotal / withDigest.length).floor().clamp(1200, maxTotal);
+    final buf = StringBuffer();
+    for (final proj in withDigest) {
+      buf
+        ..writeln('## 工程：${proj.name}')
+        ..writeln(_clip(proj.digest, perProject))
+        ..writeln();
+    }
+    return buf.toString().trim();
+  }
+
   String _sectionPrompt(
     PaperDraft draft,
     PaperSection section, {
@@ -735,17 +939,18 @@ ${_clip(draft.sourceBody, 18000)}
         : (english
               ? 'Use clean Markdown suitable for journal manuscript preview.'
               : '使用清晰 Markdown，适合期刊论文稿件预览。');
-    final hasDigest = draft.projectDigest.trim().isNotEmpty;
+    final combinedDigest = _combinedProjectDigest(draft, 9000);
+    final hasDigest = combinedDigest.trim().isNotEmpty;
     final projectBlock = !hasDigest
         ? ''
         : '''
 
-关联实验工程的真实解读（基于工程真实文件生成，务必据此写作，尤其是方法、实验设置、相关工作、结果等章节）：
-${_clip(draft.projectDigest, 8000)}
+关联工程的真实解读（基于工程真实文件生成，务必据此写作，尤其是方法、实验设置、相关工作、结果等章节）：
+$combinedDigest
 ''';
     // 有真实工程解读时，要求据此落地真实实现与实验配置；否则沿用审慎表述。
     final evidenceRule = hasDigest
-        ? '- 方法、实验设置、结果等内容必须依据上面「关联实验工程的真实解读」如实撰写，'
+        ? '- 方法、实验设置、结果等内容必须依据上面「关联工程的真实解读」如实撰写，'
               '引用真实的模块/算法、数据集、超参数、评价指标、运行环境等；'
               '严禁编造工程中不存在的数据、配置或结论；工程未体现处如实说明。'
         : '- 不编造真实实验数据或不存在的引用；若来源报告缺少数据，用审慎表述说明需要后续实证验证。';

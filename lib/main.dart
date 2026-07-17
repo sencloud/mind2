@@ -81,7 +81,7 @@ Future<void> main() async {
   );
   final mindMap = MindMapService(settings);
   final book = BookService(settings);
-  final paper = PaperService(settings);
+  final paper = PaperService(settings, project: project);
   final promo = PromoService(settings, project: project, memory: memory);
   // 「计划」：每日待办 + AI 分析并执行（复用统一 Agent 内核）。
   final plan = PlanService(settings, memory, research: topic);

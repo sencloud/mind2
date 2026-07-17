@@ -494,13 +494,8 @@ class ProjectService extends ChangeNotifier {
         ..writeln('【会话背景（需求与已实现要点）】')
         ..writeln(digest);
     }
-    final overview = index.overview();
-    if (overview.trim().isNotEmpty) {
-      buf
-        ..writeln()
-        ..writeln('【工程概览】')
-        ..writeln(_clip(overview, 1500));
-    }
+    // 工程结构/文档/相关源码由主题研究的「挂接工程」上下文包统一注入（见 _runResearchInto），
+    // 这里不再重复塞入概览。
     final clarification = buf.toString();
 
     final conv = ProjectConversation(
@@ -546,6 +541,7 @@ class ProjectService extends ChangeNotifier {
       final report = await _research!.researchForAgent(
         topic,
         clarification: clarification,
+        projectPaths: [path], // 挂接当前工程：结合代码/文档做对照研究。
         log: _status,
         recordInHistory: false, // 研究归项目所有，不进主题研究历史。
       );
