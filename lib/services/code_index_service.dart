@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import 'gitignore.dart';
+import 'ripgrep.dart';
 
 /// 工程文件扫描服务（对齐 Claude Code 的做法：**不预建语义/向量索引**）。
 ///
@@ -65,7 +66,8 @@ class CodeIndexService extends ChangeNotifier {
     scanning = true;
     notifyListeners();
     try {
-      _fileCount = (await compute(_scan, root.path)).length;
+      final rg = await Ripgrep.instance.exePath();
+      _fileCount = (await compute(_scan, (root.path, rg))).length;
     } finally {
       scanning = false;
       notifyListeners();
@@ -77,7 +79,8 @@ class CodeIndexService extends ChangeNotifier {
   Future<Map<String, int>> snapshotMtimes() async {
     final root = _root;
     if (root == null) return const {};
-    return compute(_scan, root.path);
+    final rg = await Ripgrep.instance.exePath();
+    return compute(_scan, (root.path, rg));
   }
 
   /// 顶层目录树（最多两层）+ 文件统计，作为 Agent 的初始工程概览。
@@ -85,8 +88,9 @@ class CodeIndexService extends ChangeNotifier {
 
   /// 对任意工程根路径构建概览（独立于当前绑定的工程）。会现场扫描一次文件数，
   /// 供「主题研究挂接工程」等按路径读取上下文的场景复用。
-  static String overviewFor(String rootPath) =>
-      _buildOverview(rootPath, _scan(rootPath).length);
+  /// [msg] 为 (工程根路径, rg 可执行文件路径)，以便在后台 isolate 内执行 rg。
+  static String overviewFor((String, String) msg) =>
+      _buildOverview(msg.$1, _scan(msg).length);
 
   /// 顶层目录树（最多两层）+ 文件统计的纯函数实现。
   static String _buildOverview(String? rootPath, int fileCount) {
@@ -142,50 +146,25 @@ class CodeIndexService extends ChangeNotifier {
     return buf.toString();
   }
 
-  /// 实际遍历逻辑（静态、纯函数）：接收工程根路径，返回 rel -> mtime(ms)。
-  /// 设计成静态方法是为了能被 compute 丢到后台 isolate 执行——同步的
-  /// listSync/statSync 阻塞只发生在后台线程，主 UI 线程保持流畅。
-  static Map<String, int> _scan(String rootPath) {
-    final root = Directory(rootPath);
+  /// 实际遍历逻辑（静态、纯函数）：接收 (工程根路径, rg 可执行文件路径)，
+  /// 用 ripgrep 列出遵守 .gitignore 的文件，再筛出代码文件并取 mtime。
+  /// 设计成静态方法是为了能被 compute 丢到后台 isolate 执行，主 UI 线程保持流畅。
+  static Map<String, int> _scan((String, String) msg) {
+    final rootPath = msg.$1;
+    final rgExe = msg.$2;
     final out = <String, int>{};
-    final rootIgnore = GitIgnoreMatcher.load(root);
-
-    void walk(Directory dir, String relDir, GitIgnoreMatcher gi) {
-      List<FileSystemEntity> entries;
+    for (final rel in Ripgrep.listFilesSync(rgExe, rootPath)) {
+      final ext = p.extension(rel).toLowerCase();
+      if (!_codeExts.contains(ext)) continue;
+      FileStat st;
       try {
-        entries = dir.listSync(followLinks: false);
+        st = File(p.join(rootPath, rel)).statSync();
       } catch (_) {
-        return;
+        continue;
       }
-      // 先加载本目录 .gitignore，再判断子项
-      final localGi =
-          relDir.isEmpty ? gi : gi.descend(dir, relDir);
-
-      for (final e in entries) {
-        final name = p.basename(e.path);
-        final rel =
-            relDir.isEmpty ? name : '$relDir/$name';
-        if (e is Directory) {
-          if (ignoreDirs.contains(name)) continue;
-          if (localGi.isIgnored(rel, isDir: true)) continue;
-          walk(e, rel, localGi);
-        } else if (e is File) {
-          if (localGi.isIgnored(rel, isDir: false)) continue;
-          final ext = p.extension(name).toLowerCase();
-          if (!_codeExts.contains(ext)) continue;
-          FileStat st;
-          try {
-            st = e.statSync();
-          } catch (_) {
-            continue;
-          }
-          if (st.size == 0) continue;
-          out[rel.replaceAll('\\', '/')] = st.modified.millisecondsSinceEpoch;
-        }
-      }
+      if (st.size == 0) continue;
+      out[rel] = st.modified.millisecondsSinceEpoch;
     }
-
-    walk(root, '', rootIgnore);
     return out;
   }
 }

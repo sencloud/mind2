@@ -1,11 +1,10 @@
 import 'dart:io';
 
-import 'package:path/path.dart' as p;
-
+import '../../ripgrep.dart';
 import '../tool.dart';
 import 'fs_helper.dart';
 
-/// 按 glob 模式查找文件。
+/// 按 glob 模式查找文件（基于捆绑的 ripgrep：rg --files -g，原生遵守 .gitignore）。
 class GlobTool extends AgentTool {
   static const _limit = 200;
 
@@ -35,27 +34,25 @@ class GlobTool extends AgentTool {
 
   @override
   Future<ToolResult> call(Map<String, dynamic> input, ToolContext ctx) async {
-    final base =
-        resolvePath(ctx.root, (input['path'] ?? '').toString());
-    final dir = Directory(base);
-    if (!await dir.exists()) return ToolResult.error('目录不存在：$base');
-    final re = globToRegExp(input['pattern'].toString());
+    final base = resolvePath(ctx.root, (input['path'] ?? '').toString());
+    if (!await Directory(base).exists()) {
+      return ToolResult.error('目录不存在：$base');
+    }
+    final pattern = input['pattern'].toString().trim();
+    if (pattern.isEmpty) return ToolResult.error('缺少 glob 模式');
+
     final matches = <String>[];
     var truncated = false;
     try {
-      await for (final e in walkFiles(
-        dir,
+      await for (final rel in Ripgrep.instance.listFiles(
+        base,
+        globs: [pattern],
         isCancelled: ctx.isCancelled,
-        ignoreRoot: Directory(ctx.root),
       )) {
-        if (ctx.isCancelled()) break;
-        final rel = p.relative(e.path, from: base).replaceAll('\\', '/');
-        if (re.hasMatch(rel)) {
-          matches.add(rel);
-          if (matches.length >= _limit) {
-            truncated = true;
-            break;
-          }
+        matches.add(rel);
+        if (matches.length >= _limit) {
+          truncated = true;
+          break;
         }
       }
     } catch (e) {

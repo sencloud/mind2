@@ -16,6 +16,7 @@ import 'code_index_service.dart';
 import 'document_service.dart';
 import 'library_service.dart';
 import 'project_doc_store.dart';
+import 'ripgrep.dart';
 import 'settings_service.dart';
 
 /// 一类标准项目文档：定义文档的分类、写作结构要求，以及生成时应重点结合的工程信息。
@@ -440,7 +441,8 @@ class ProjectDocService extends ChangeNotifier {
       // ①b 采集真实代码语料（一次），供每份文档按聚焦点检索、落地到真实代码。
       phase = '正在采集工程真实代码…';
       notifyListeners();
-      final corpus = await compute(_collectCodeCorpus, dir.path);
+      final rg = await Ripgrep.instance.exePath();
+      final corpus = await compute(_collectCodeCorpus, (dir.path, rg));
       if (corpus.isEmpty) {
         _log('⚠ 未采集到可引用的源码文件，文档将主要依据工程分析生成。');
       } else {
@@ -568,7 +570,8 @@ class ProjectDocService extends ChangeNotifier {
     detailPhase = '正在采集相关代码…';
     notifyListeners();
     try {
-      final corpus = await compute(_collectCodeCorpus, projectPath);
+      final rg = await Ripgrep.instance.exePath();
+      final corpus = await compute(_collectCodeCorpus, (projectPath, rg));
       final code = _selectCode(corpus, _keywordsForText('${node.title} ${node.desc}'));
       detailPhase = '正在撰写《${node.title}》详细设计…';
       notifyListeners();
@@ -636,7 +639,8 @@ class ProjectDocService extends ChangeNotifier {
     detailPhase = '正在采集相关代码…';
     notifyListeners();
     try {
-      final corpus = await compute(_collectCodeCorpus, projectPath);
+      final rg = await Ripgrep.instance.exePath();
+      final corpus = await compute(_collectCodeCorpus, (projectPath, rg));
       final code = _selectCode(corpus, _catKeywords[cat.id] ?? _fallbackKeywords);
       detailPhase = revising ? '正在修订《${cat.name}》…' : '正在生成《${cat.name}》…';
       notifyListeners();
@@ -730,7 +734,8 @@ class ProjectDocService extends ChangeNotifier {
     detailPhase = '正在生成结构化概览（${depthLabels[depth] ?? depth}）…';
     notifyListeners();
     try {
-      final inventory = await compute(_collectPathInventory, projectPath);
+      final rg = await Ripgrep.instance.exePath();
+      final inventory = await compute(_collectPathInventory, (projectPath, rg));
       final messages = <Map<String, dynamic>>[
         {
           'role': 'system',
@@ -819,7 +824,8 @@ ${_clip(analysis, depth == 'quick' ? 8000 : 20000)}
         : '正在深入「${scopeLabel.isEmpty ? scopePath : scopeLabel}」生成${_archKindName(kind)}…';
     notifyListeners();
     try {
-      var inventory = await compute(_collectPathInventory, projectPath);
+      final rg = await Ripgrep.instance.exePath();
+      var inventory = await compute(_collectPathInventory, (projectPath, rg));
       // 下钻到某目录时，清单聚焦到该子树（更精准、更省 token）。
       if (scopePath.isNotEmpty) {
         final scoped = inventory
@@ -1037,6 +1043,80 @@ ${_clip(analysis, 14000)}
     }
   }
 
+  /// 供论文选题：让 Agent 在工程内多轮 grep/glob/read 深挖，围绕“这个工程能支撑
+  /// 哪些研究方向、可拟哪些论文题目”产出分方向、成体系的富文本分析（不落库）。
+  /// 与「项目对话」共用同一套 AgentRunner，因此深度/广度与项目概览对话一致。
+  Future<String> exploreForTopics(
+    String projectPath, {
+    String extraBrief = '',
+    void Function(String line)? onProgress,
+    bool Function()? isCancelled,
+  }) async {
+    final dir = Directory(projectPath);
+    if (!await dir.exists()) throw StateError('项目目录不存在：$projectPath');
+    final rec = await store.load(projectPath);
+    final projectName =
+        rec.projectName.isEmpty ? p.basename(projectPath) : rec.projectName;
+    final buf = StringBuffer();
+    final reporter = AgentReporter(
+      onStatus: (m) => onProgress?.call(m),
+      onToolStart: (_, _, title) => onProgress?.call('🔎 $title'),
+      onToolEnd: (_, isError, _) {
+        if (isError) onProgress?.call('⚠ 工具执行出错');
+      },
+      onAssistantText: (full) {
+        if (full.trim().isNotEmpty) buf.write(full);
+        final snippet = full
+            .trim()
+            .split('\n')
+            .map((l) => l.trim())
+            .firstWhere((l) => l.isNotEmpty, orElse: () => '');
+        if (snippet.isNotEmpty) {
+          onProgress?.call(
+            '💭 ${snippet.length > 64 ? '${snippet.substring(0, 64)}…' : snippet}',
+          );
+        }
+      },
+    );
+    final result = await _runner.run(
+      dir: dir,
+      systemPrompt: _topicSystem(projectName, rec.analysis),
+      initialMessages: [Msg.user(_topicQuestion(extraBrief))],
+      recallQuery: 'paper research directions and candidate topics',
+      reporter: reporter,
+      isCancelled: isCancelled ?? () => false,
+      enableMemory: false,
+      extractMemory: false,
+      maxTurns: 0,
+      maxDepth: 1,
+    );
+    var out = buf.toString().trim();
+    if (out.isEmpty) out = _lastAssistantText(result.messages).trim();
+    return out;
+  }
+
+  String _topicSystem(String projectName, String analysis) => '''
+你是资深科研选题顾问，正在研究工程「$projectName」，目标是判断它能支撑哪些**有深度、有广度、可投稿**的学术论文方向与题目。
+
+可用工具（路径相对工程根目录，只读）：read_file / grep / glob。
+
+工作方式：
+1. 先用 grep/glob 摸清工程的核心能力、关键模块与技术特色，read_file 精读关键实现后再判断，不要凭空猜。
+2. 从工程真实能力出发，**发散出多个不同研究方向**（问题视角 / 方法层面 / 应用层面等），每个方向再给若干候选论文题目。
+3. 论文要**高于并抽象于具体工程**：题目与研究焦点用通用学术语言；可在心里以代码为据，但**产出中不要出现文件名/函数名/类名/库版本等实现痕迹**。
+4. 用中文 Markdown 输出，按「研究方向 → 该方向下的候选题目（中文题目 + 一句话研究问题/创新点）」组织，尽量覆盖多个方向。
+5. 充分检索后再作答，追求深度与广度。
+
+以下是此前生成的《工程分析》摘要，可作背景（仍以实际检索为准）：
+${_clip(analysis, 6000)}
+''';
+
+  String _topicQuestion(String extraBrief) => '''
+请深入检索这个工程的代码与能力，判断它能支撑哪些方向的学术论文，并为每个方向拟出候选论文题目（分方向、成体系、有深度有广度）。
+${extraBrief.trim().isEmpty ? '' : '\n补充背景 / 研究倾向：\n$extraBrief\n'}
+要求：多给几个不同方向；每个方向 2-3 个候选题目；题目抽象、学术、可投稿，不要出现具体文件名/函数名。
+''';
+
   /// 删除一段对话会话。
   Future<ProjectDocRecord> deleteQaSession({
     required String projectPath,
@@ -1071,33 +1151,16 @@ ${_clip(analysis, 6000)}
 ''';
 
   /// 轻量收集工程内文件相对路径清单（不读内容），isolate 中执行。
-  static List<String> _collectPathInventory(String rootPath) {
+  /// [msg] 为 (工程根路径, rg 可执行文件路径)。
+  static List<String> _collectPathInventory((String, String) msg) {
+    final rootPath = msg.$1;
+    final rgExe = msg.$2;
     final out = <String>[];
-    final root = Directory(rootPath);
-    void walk(Directory d, int depth) {
-      if (depth > 6 || out.length >= 800) return;
-      List<FileSystemEntity> entries;
-      try {
-        entries = d.listSync(followLinks: false);
-      } catch (_) {
-        return;
-      }
-      for (final e in entries) {
-        if (out.length >= 800) return;
-        final name = p.basename(e.path);
-        if (name.startsWith('.')) continue;
-        if (e is Directory) {
-          if (CodeIndexService.ignoreDirs.contains(name.toLowerCase())) {
-            continue;
-          }
-          walk(e, depth + 1);
-        } else if (e is File) {
-          out.add(p.relative(e.path, from: rootPath).replaceAll('\\', '/'));
-        }
-      }
+    for (final rel in Ripgrep.listFilesSync(rgExe, rootPath)) {
+      if ('/'.allMatches(rel).length > 6) continue;
+      out.add(rel);
+      if (out.length >= 800) break;
     }
-
-    walk(root, 0);
     out.sort();
     return out;
   }
@@ -1631,8 +1694,9 @@ ${codeBlock.trim().isEmpty ? '' : '【相关真实代码片段（与本文档最
 
   /// 在后台 isolate 遍历工程，采集用于据实撰写的真实文件内容（含路径）。
   /// 文档/依赖清单/配置/建表脚本优先，其余源码按浅层优先收集，控制总预算。
-  static List<Map<String, String>> _collectCodeCorpus(String rootPath) {
-    const ignore = CodeIndexService.ignoreDirs;
+  static List<Map<String, String>> _collectCodeCorpus((String, String) msg) {
+    final rootPath = msg.$1;
+    final rgExe = msg.$2;
     const exts = {
       '.dart', '.py', '.js', '.jsx', '.ts', '.tsx', '.java', '.kt', '.go',
       '.rs', '.c', '.h', '.cc', '.cpp', '.hpp', '.cxx', '.cs', '.rb', '.php',
@@ -1646,29 +1710,15 @@ ${codeBlock.trim().isEmpty ? '' : '【相关真实代码片段（与本文档最
     const perFileCap = 6000;
 
     final collected = <({int depth, File file})>[];
-    void walk(Directory dir, int depth) {
-      if (collected.length >= maxFiles * 4) return;
-      List<FileSystemEntity> entries;
-      try {
-        entries = dir.listSync(followLinks: false);
-      } catch (_) {
-        return;
-      }
-      for (final e in entries) {
-        final name = p.basename(e.path);
-        final lower = name.toLowerCase();
-        if (e is Directory) {
-          if (ignore.contains(name) || name.startsWith('.')) continue;
-          if (depth < 6) walk(e, depth + 1);
-        } else if (e is File) {
-          final ext = p.extension(lower);
-          if (!exts.contains(ext) && !manifestNames.contains(lower)) continue;
-          collected.add((depth: depth, file: e));
-        }
-      }
+    for (final rel in Ripgrep.listFilesSync(rgExe, rootPath)) {
+      if (collected.length >= maxFiles * 4) break;
+      final depth = '/'.allMatches(rel).length;
+      if (depth > 6) continue;
+      final lower = p.basename(rel).toLowerCase();
+      final ext = p.extension(lower);
+      if (!exts.contains(ext) && !manifestNames.contains(lower)) continue;
+      collected.add((depth: depth, file: File(p.join(rootPath, rel))));
     }
-
-    walk(Directory(rootPath), 0);
 
     int priority(String lower, String ext) {
       if (lower.startsWith('readme')) return 0;

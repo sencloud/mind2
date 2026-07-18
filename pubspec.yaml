@@ -81,6 +81,11 @@ flutter:
 
   assets:
     - assets/icon/app_icon.png
+    # 捆绑 ripgrep(rg) 二进制：运行时释放到应用支持目录后执行（grep/glob/文件枚举）。
+    - assets/bin/windows/rg.exe
+    - assets/bin/linux/rg
+    - assets/bin/macos/rg
+    - assets/bin/macos/rg-x64
 
   # To add assets to your application, add an assets section, like this:
   # assets:

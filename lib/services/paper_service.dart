@@ -8,8 +8,9 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../models.dart';
-import 'code_index_service.dart';
+import 'project_doc_service.dart';
 import 'project_service.dart';
+import 'ripgrep.dart';
 import 'settings_service.dart';
 
 enum PaperFormat {
@@ -30,6 +31,69 @@ enum PaperFormat {
     'latex' => PaperFormat.latex,
     _ => PaperFormat.markdown,
   };
+}
+
+/// 写稿 / 审校 / 导出的目标语种。
+enum PaperLang {
+  zh,
+  en,
+  both;
+
+  bool get writeZh => this == PaperLang.zh || this == PaperLang.both;
+  bool get writeEn => this == PaperLang.en || this == PaperLang.both;
+}
+
+/// 论文中的一张图（由 matplotlib 出图并保存高清 PNG，中英稿共用同一张图）。
+class PaperFigure {
+  PaperFigure({
+    required this.id,
+    required this.kind,
+    required this.titleZh,
+    required this.titleEn,
+    this.captionZh = '',
+    this.captionEn = '',
+    this.pngPath = '',
+    this.section = '',
+  });
+
+  final String id;
+
+  /// flow / bar / grouped_bar / line / heatmap / confusion。
+  final String kind;
+  final String titleZh;
+  final String titleEn;
+  final String captionZh;
+  final String captionEn;
+
+  /// 生成的高清 PNG 原图绝对路径。
+  String pngPath;
+
+  /// 归属章节（用于把图插入对应章节）：methods / results / …。
+  final String section;
+
+  bool get hasImage => pngPath.trim().isNotEmpty;
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'kind': kind,
+    'titleZh': titleZh,
+    'titleEn': titleEn,
+    'captionZh': captionZh,
+    'captionEn': captionEn,
+    'pngPath': pngPath,
+    'section': section,
+  };
+
+  factory PaperFigure.fromJson(Map<String, dynamic> json) => PaperFigure(
+    id: json['id'] as String? ?? '',
+    kind: json['kind'] as String? ?? 'bar',
+    titleZh: json['titleZh'] as String? ?? '',
+    titleEn: json['titleEn'] as String? ?? '',
+    captionZh: json['captionZh'] as String? ?? '',
+    captionEn: json['captionEn'] as String? ?? '',
+    pngPath: json['pngPath'] as String? ?? '',
+    section: json['section'] as String? ?? '',
+  );
 }
 
 class PaperSection {
@@ -137,9 +201,14 @@ class PaperDraft {
     List<LinkedProject>? linkedProjects,
     List<PaperTopicOption>? topicOptions,
     this.topicBrief = '',
+    this.factBaseline = '',
+    this.reviewReport = '',
+    this.reviewLang = '',
+    List<PaperFigure>? figures,
     List<PaperSection>? sections,
   })  : linkedProjects = linkedProjects ?? [],
         topicOptions = topicOptions ?? [],
+        figures = figures ?? [],
         sections = sections ?? [];
 
   final String id;
@@ -161,6 +230,19 @@ class PaperDraft {
 
   /// 用户选定选题后的「相关信息」（研究问题/创新点/工程支撑），指导结构生成与写作。
   String topicBrief;
+
+  /// 统一的「研究设定 / 事实基线」（抽象、去标识、全篇自洽），写作前生成，供结构、
+  /// 各章节、图表一致地引用，避免像工程解读、避免前后数据矛盾。
+  String factBaseline;
+
+  /// 最近一次审校生成的「多专家意见 + 汇总讨论 + 修订清单」（Markdown）。
+  String reviewReport;
+
+  /// 审校/润色针对的语种（zh / en）。
+  String reviewLang;
+
+  /// 论文配图（matplotlib 生成的高清图，中英稿共用）。
+  List<PaperFigure> figures;
 
   bool get hasLinkedProject => linkedProjects.isNotEmpty;
 
@@ -184,6 +266,10 @@ class PaperDraft {
     'linkedProjects': linkedProjects.map((e) => e.toJson()).toList(),
     'topicOptions': topicOptions.map((e) => e.toJson()).toList(),
     'topicBrief': topicBrief,
+    'factBaseline': factBaseline,
+    'reviewReport': reviewReport,
+    'reviewLang': reviewLang,
+    'figures': figures.map((e) => e.toJson()).toList(),
     'sections': sections.map((section) => section.toJson()).toList(),
   };
 
@@ -208,6 +294,13 @@ class PaperDraft {
         .map((e) => PaperTopicOption.fromJson(e.cast<String, dynamic>()))
         .toList(),
     topicBrief: json['topicBrief'] as String? ?? '',
+    factBaseline: json['factBaseline'] as String? ?? '',
+    reviewReport: json['reviewReport'] as String? ?? '',
+    reviewLang: json['reviewLang'] as String? ?? '',
+    figures: ((json['figures'] as List?) ?? [])
+        .whereType<Map>()
+        .map((e) => PaperFigure.fromJson(e.cast<String, dynamic>()))
+        .toList(),
     sections: ((json['sections'] as List?) ?? [])
         .whereType<Map>()
         .map(
@@ -218,12 +311,15 @@ class PaperDraft {
 }
 
 class PaperService extends ChangeNotifier {
-  PaperService(this.settings, {this.project});
+  PaperService(this.settings, {this.project, this.docs});
 
   final SettingsService settings;
 
   /// 项目服务（桌面端），用于「关联工程」时列出最近打开的工程；移动端为空。
   final ProjectService? project;
+
+  /// 项目文档/对话服务，用于「推荐选题」时复用多轮 Agent 深挖工程代码。
+  final ProjectDocService? docs;
 
   /// 最近打开过的工程路径（供关联工程时快速选择）。
   List<String> get recentProjects => project?.projects ?? const [];
@@ -233,6 +329,9 @@ class PaperService extends ChangeNotifier {
   PaperSection? activeSection;
   bool busy = false;
   String stage = '';
+
+  /// 运行过程的实时进度日志（如 Agent 的每一步检索），供 UI 展示，避免"卡住无反馈"。
+  final List<String> progressLog = [];
 
   bool _cancel = false;
   File? _store;
@@ -348,10 +447,6 @@ class PaperService extends ChangeNotifier {
     }
     _begin('正在与工程交互、生成推荐选题…');
     try {
-      await _ensureDigests(draft);
-      if (_cancel) return;
-      stage = '正在综合工程与研究，拟定候选选题…';
-      notifyListeners();
       final options = await _planTopics(draft);
       if (_cancel) return;
       draft.topicOptions = options;
@@ -378,33 +473,70 @@ class PaperService extends ChangeNotifier {
   }
 
   Future<List<PaperTopicOption>> _planTopics(PaperDraft draft) async {
-    final projectBlock = _combinedProjectDigest(draft, 12000);
+    // 用多轮 Agent（与「项目概览对话」同一套）在工程内 grep/glob/read 深挖，
+    // 得到分方向、有深度的富文本分析，再据此结构化出候选选题。
+    final explorations = StringBuffer();
+    final extraBrief = [
+      if (draft.topicBrief.trim().isNotEmpty) draft.topicBrief.trim(),
+      if (draft.sourceResearchTitle.trim().isNotEmpty)
+        '来源研究报告：${draft.sourceResearchTitle.trim()}',
+    ].join('\n');
+    if (docs != null) {
+      for (final proj in draft.linkedProjects) {
+        if (_cancel) break;
+        stage = '正在让智能体深入检索工程：${proj.name}…';
+        notifyListeners();
+        try {
+          final text = await docs!.exploreForTopics(
+            proj.path,
+            extraBrief: extraBrief,
+            onProgress: (line) => _pushProgress('[${proj.name}] $line'),
+            isCancelled: () => _cancel,
+          );
+          if (text.trim().isNotEmpty) {
+            explorations
+              ..writeln('## 工程「${proj.name}」的深挖分析')
+              ..writeln(text.trim())
+              ..writeln();
+          }
+        } catch (e) {
+          explorations.writeln('（工程「${proj.name}」检索失败：$e）');
+        }
+      }
+    }
+    final exploreBlock = explorations.toString().trim();
+    if (_cancel) return draft.topicOptions;
+    stage = '正在综合检索结果，拟定分方向的候选选题…';
+    notifyListeners();
     final reply = await _chat([
       {
         'role': 'system',
         'content':
-            '你是资深 SCI 期刊选题顾问。你结合真实工程实现与研究报告，给出可投稿、'
-            '有明确创新点、且能被工程真实支撑的论文选题。只输出 JSON，不要解释。',
+            '你是资深 SCI 期刊选题顾问。你依据「智能体对工程的深挖分析」提炼可投稿、'
+            '有明确研究问题与创新点的论文选题。论文要高于并抽象于具体工程：题目与摘要'
+            '中不得出现文件名/函数名/类名/库版本等实现痕迹。只输出 JSON，不要解释。',
       },
       {
         'role': 'user',
         'content':
             '''
-请结合下面的「关联工程真实解读」与「来源研究报告」（可能为空），为一篇可投稿的 SCI 期刊论文推荐 4-6 个候选选题（题目）。
+请基于下面「智能体对关联工程的深挖分析」（及可选的来源研究报告），为可投稿的 SCI 论文推荐 5-8 个候选选题，
+要求**覆盖多个不同研究方向、有深度有广度**，而非都挤在一个方向。
 要求：
-- 每个选题必须能被关联工程的真实实现支撑（方法/实验/数据），突出创新点与研究问题，避免泛泛而谈；
-- 给出具体、学术、可投稿的中文题目与英文题目；
-- summary 用中文写清四点：研究问题、核心创新点、可用的工程支撑（对应到工程里的模块/方法/实验）、建议关键词。
+- 题目抽象、学术、可投稿，体现清晰的研究问题与创新点；论文高于具体工程，**不要出现文件名/函数名/类名/库版本等实现痕迹**；
+- 尽量覆盖不同视角（问题层面 / 方法层面 / 理论层面 / 应用层面等）；
+- 给出中文题目与英文题目；
+- summary 用中文写清四点：研究问题、核心创新点、方法/技术要点（抽象表述）、建议关键词。
 
 严格输出 JSON：
-{"topics":[{"titleZh":"...","titleEn":"...","summary":"研究问题：… 创新点：… 工程支撑：… 关键词：…"}]}
+{"topics":[{"titleZh":"...","titleEn":"...","summary":"研究问题：… 创新点：… 方法要点：… 关键词：…"}]}
 
-关联工程真实解读：
-${projectBlock.isEmpty ? '（无）' : projectBlock}
+智能体对关联工程的深挖分析：
+${exploreBlock.isEmpty ? '（无）' : _clip(exploreBlock, 16000)}
 
 来源研究报告标题：${draft.sourceResearchTitle.isEmpty ? '（无）' : draft.sourceResearchTitle}
 来源研究报告正文：
-${draft.sourceBody.trim().isEmpty ? '（无）' : _clip(draft.sourceBody, 8000)}
+${draft.sourceBody.trim().isEmpty ? '（无）' : _clip(draft.sourceBody, 6000)}
 ''',
       },
     ], jsonMode: true);
@@ -432,6 +564,8 @@ ${draft.sourceBody.trim().isEmpty ? '（无）' : _clip(draft.sourceBody, 8000)}
     try {
       await _ensureDigests(draft);
       if (_cancel) return;
+      await _ensureBaseline(draft);
+      if (_cancel) return;
       await _planPaper(draft);
       stage = '题目与结构已生成';
     } catch (e) {
@@ -441,42 +575,324 @@ ${draft.sourceBody.trim().isEmpty ? '（无）' : _clip(draft.sourceBody, 8000)}
     }
   }
 
-  Future<void> writeBilingualDraft([PaperDraft? target]) async {
+  /// 按所选语种写稿（中文 / 英文 / 双语）。写作前会先确保「统一研究基线」已建立，
+  /// 使全篇抽象、去标识、数据自洽；不再把工程实现细节直接写进正文。
+  Future<void> writeDraft(PaperLang lang, [PaperDraft? target]) async {
     final draft = target ?? current;
     if (draft == null || busy) return;
     _begin('正在准备论文写作…');
     try {
+      await _ensureDigests(draft);
+      if (_cancel) return;
+      await _ensureBaseline(draft);
+      if (_cancel) return;
       if (draft.sections.isEmpty || draft.titleEn.trim().isEmpty) {
         await _planPaper(draft);
       }
       if (_cancel) return;
-      // 关联了工程但尚未解读：先逐个解读，确保方法/实验设置能引用真实实现。
-      await _ensureDigests(draft);
-      if (_cancel) return;
       final total = draft.sections.length;
+      final langLabel = switch (lang) {
+        PaperLang.zh => '中文稿',
+        PaperLang.en => '英文稿',
+        PaperLang.both => '双语稿',
+      };
       for (var i = 0; i < draft.sections.length; i++) {
         if (_cancel) break;
         final section = draft.sections[i];
         activeSection = section;
-        section.zh = '';
-        section.en = '';
-        stage = '正在写中文稿：${section.zhTitle}（${i + 1}/$total）…';
-        notifyListeners();
-        section.zh = await _streamSection(draft, section, english: false);
-        if (_cancel) break;
-        stage = '正在写英文稿：${section.enTitle}（${i + 1}/$total）…';
-        notifyListeners();
-        section.en = await _streamSection(draft, section, english: true);
+        if (lang.writeZh) {
+          section.zh = '';
+          stage = '正在写中文稿：${section.zhTitle}（${i + 1}/$total）…';
+          notifyListeners();
+          section.zh = await _streamSection(draft, section, english: false);
+          if (_cancel) break;
+        }
+        if (lang.writeEn) {
+          section.en = '';
+          stage = '正在写英文稿：${section.enTitle}（${i + 1}/$total）…';
+          notifyListeners();
+          section.en = await _streamSection(draft, section, english: true);
+          if (_cancel) break;
+        }
         draft.updatedAt = DateTime.now();
         await _persist();
       }
-      stage = _cancel ? '已停止' : '论文双语草稿已完成';
+      stage = _cancel ? '已停止' : '论文$langLabel已完成';
     } catch (e) {
       stage = _cancel ? '已停止' : '论文写作失败：$e';
     } finally {
       _end();
       await _persist();
     }
+  }
+
+  /// 生成「统一研究设定 / 事实基线」：把（可选的）工程解读上升为抽象、去标识、
+  /// 全篇自洽的研究设定，作为结构/写作/图表的唯一事实来源。若已存在则跳过。
+  Future<void> _ensureBaseline(PaperDraft draft) async {
+    if (draft.factBaseline.trim().isNotEmpty) return;
+    stage = '正在确立统一的研究设定与事实基线…';
+    notifyListeners();
+    draft.factBaseline = await _buildBaseline(draft);
+    await _persist();
+  }
+
+  /// 手动（重新）确立研究基线。
+  Future<void> buildBaseline([PaperDraft? target]) async {
+    final draft = target ?? current;
+    if (draft == null || busy) return;
+    _begin('正在确立统一的研究设定与事实基线…');
+    try {
+      await _ensureDigests(draft);
+      if (_cancel) return;
+      draft.factBaseline = await _buildBaseline(draft);
+      draft.updatedAt = DateTime.now();
+      stage = '研究设定与事实基线已确立';
+      await _persist();
+    } catch (e) {
+      stage = _cancel ? '已停止' : '确立研究基线失败：$e';
+    } finally {
+      _end();
+    }
+  }
+
+  /// 参与审校的固定 5 位专家（名称 + 关注点）。
+  static const List<(String, String)> _reviewExperts = [
+    ('方法学专家', '研究问题是否清晰、方法是否严谨、创新点是否成立、逻辑链条是否完整'),
+    ('领域专家', '相关工作覆盖是否充分、学术定位是否准确、贡献的领域价值与新意'),
+    ('实验与统计审稿人', '实验设计与评测协议是否合理、指标是否恰当、数据是否自洽、结论是否被证据支撑'),
+    ('写作与语言编辑', '结构与逻辑、表达与术语一致性、学术规范、可读性、图表与引用规范'),
+    ('主编终审', '整体是否达到期刊发表标准、创新性与完整性、修改取舍与优先级'),
+  ];
+
+  /// 审校：5 位专家分别审阅当前语种全文，汇总讨论后形成按章节、按优先级的修订清单，
+  /// 写入 draft.reviewReport（供用户查看并确认后再润色）。
+  Future<void> reviewPaper(PaperLang lang, [PaperDraft? target]) async {
+    final draft = target ?? current;
+    if (draft == null || busy) return;
+    final english = lang == PaperLang.en;
+    final paperText = _fullPaperText(draft, english: english);
+    if (paperText.trim().isEmpty) {
+      stage = '请先写出${english ? '英文稿' : '中文稿'}再审校';
+      notifyListeners();
+      return;
+    }
+    _begin('正在组织专家审校…');
+    try {
+      final title = english ? draft.titleEn : draft.titleZh;
+      final opinions = <String>[];
+      for (final (name, focus) in _reviewExperts) {
+        if (_cancel) break;
+        stage = '专家审校中：$name…';
+        notifyListeners();
+        final op = await _chat([
+          {
+            'role': 'system',
+            'content':
+                '你是一位「$name」，正在为 SCI 期刊评审一篇论文，关注点：$focus。'
+                '请聚焦要点、务实犀利，用中文输出你的审校意见（无论稿件语种）。',
+          },
+          {
+            'role': 'user',
+            'content':
+                '''
+请审校下面这篇论文，指出具体问题并给出可操作的修改建议（分条列出，标注涉及章节）。
+请特别检查：
+- 是否像“工程解读/项目报告”而非学术论文；是否残留具体工程实现痕迹（文件名/函数/库版本/机器型号/“本工程”等）；
+- 数据、实验设定与结论是否前后自洽、有无夸大或矛盾；
+- 是否达到期刊发表水准（创新性、严谨性、完整性、规范性）。
+仅输出你的审校意见。
+
+论文题目：$title
+
+论文全文：
+$paperText
+''',
+          },
+        ]);
+        opinions.add('### $name\n\n${op.trim()}');
+      }
+      if (_cancel) return;
+      stage = '正在汇总专家意见、形成修订清单…';
+      notifyListeners();
+      final consolidated = await _chat([
+        {
+          'role': 'system',
+          'content': '你是期刊主编，负责整合多位专家的审校意见。用中文输出 Markdown，务实、可执行。',
+        },
+        {
+          'role': 'user',
+          'content':
+              '''
+下面是 5 位专家对同一篇论文的审校意见。请：
+1）简要汇总各专家意见，指出共识与分歧；
+2）形成一份**按章节组织、按优先级排序、可执行**的修订清单（每条写清：涉及章节 + 具体修改动作）。
+
+专家意见：
+${opinions.join('\n\n')}
+''',
+        },
+      ]);
+      if (_cancel) return;
+      final report = StringBuffer()
+        ..writeln('# 审校意见（${english ? '英文稿' : '中文稿'}）')
+        ..writeln()
+        ..writeln('## 专家意见')
+        ..writeln()
+        ..writeln(opinions.join('\n\n'))
+        ..writeln()
+        ..writeln('## 汇总讨论与修订清单')
+        ..writeln()
+        ..writeln(consolidated.trim());
+      draft.reviewReport = report.toString();
+      draft.reviewLang = english ? 'en' : 'zh';
+      draft.updatedAt = DateTime.now();
+      stage = '审校完成，请查看意见并确认润色';
+      await _persist();
+    } catch (e) {
+      stage = _cancel ? '已停止' : '审校失败：$e';
+    } finally {
+      _end();
+    }
+  }
+
+  /// 润色主笔人：依据审校修订清单与研究基线，逐节修订当前语种稿件。
+  Future<void> applyPolish(PaperLang lang, [PaperDraft? target]) async {
+    final draft = target ?? current;
+    if (draft == null || busy) return;
+    if (draft.reviewReport.trim().isEmpty) {
+      stage = '请先执行「审校」，再进行润色';
+      notifyListeners();
+      return;
+    }
+    final english = lang == PaperLang.en;
+    _begin('润色主笔人正在据审校意见修订…');
+    try {
+      final total = draft.sections.length;
+      final syntax = draft.format == PaperFormat.latex ? 'LaTeX 片段' : 'Markdown';
+      for (var i = 0; i < draft.sections.length; i++) {
+        if (_cancel) break;
+        final section = draft.sections[i];
+        final current = english ? section.en : section.zh;
+        if (current.trim().isEmpty) continue;
+        activeSection = section;
+        stage = '润色：${english ? section.enTitle : section.zhTitle}（${i + 1}/$total）…';
+        notifyListeners();
+        final polished = await _chat([
+          {
+            'role': 'system',
+            'content':
+                '你是资深论文润色主笔人。你依据审校修订清单与研究设定基线，对论文逐节修订，'
+                '使其达到 SCI 期刊发表水准：学术、抽象、去除一切具体工程实现痕迹，数据与结论与基线一致、'
+                '前后不矛盾、不夸大。保持$syntax格式，不要重复本节标题，只输出修订后的本节正文。',
+          },
+          {
+            'role': 'user',
+            'content':
+                '''
+请根据「修订清单」与「研究设定基线」，修订并润色下面这一节，落实其中与本节相关的意见。
+
+修订清单（审校意见）：
+${_clip(draft.reviewReport, 6000)}
+
+统一研究设定 / 事实基线：
+${draft.factBaseline.trim().isEmpty ? '（无）' : _clip(draft.factBaseline, 4000)}
+
+本节标题：${english ? section.enTitle : section.zhTitle}
+
+本节当前内容：
+$current
+
+只输出修订后的本节正文（不含标题）。
+''',
+          },
+        ]);
+        if (_cancel) break;
+        final cleaned = polished.trim();
+        if (cleaned.isNotEmpty) {
+          if (english) {
+            section.en = cleaned;
+          } else {
+            section.zh = cleaned;
+          }
+          draft.updatedAt = DateTime.now();
+          await _persist();
+        }
+      }
+      stage = _cancel ? '已停止' : '润色完成';
+    } catch (e) {
+      stage = _cancel ? '已停止' : '润色失败：$e';
+    } finally {
+      _end();
+      await _persist();
+    }
+  }
+
+  /// 拼出当前语种的论文全文（标题 + 各节），用于审校/图表分析，按预算裁剪。
+  String _fullPaperText(PaperDraft draft, {required bool english}) {
+    final buf = StringBuffer();
+    for (final section in draft.sections) {
+      final title = english ? section.enTitle : section.zhTitle;
+      final body = (english ? section.en : section.zh).trim();
+      if (body.isEmpty) continue;
+      buf
+        ..writeln('## $title')
+        ..writeln()
+        ..writeln(_clip(body, 3200))
+        ..writeln();
+    }
+    return buf.toString().trim();
+  }
+
+  Future<String> _buildBaseline(PaperDraft draft) async {
+    final projectBlock = _combinedProjectDigest(draft, 12000);
+    final reply = await _chat([
+      {
+        'role': 'system',
+        'content':
+            '你是资深 SCI 论文的科研设计顾问。你的任务是把（可能来自具体工程的）素材，'
+            '抽象、升华为一个可支撑高质量学术论文的「研究设定」。论文必须高于并独立于任何具体工程实现：'
+            '严禁保留任何实现痕迹（文件名/路径、函数名/类名、库及版本号、CPU/机器型号、“本工程/本项目”等）。'
+            '所有数据与设定必须自洽、可发表、不夸大。只输出所要求的 Markdown，不要解释。',
+      },
+      {
+        'role': 'user',
+        'content':
+            '''
+请依据下面的素材，产出一份「统一研究设定 / 事实基线」。它是全篇论文（结构、各章节、图表）唯一的事实来源，
+必须抽象、去标识、前后自洽。请严格按以下小节输出（Markdown）：
+
+## 研究问题与目标
+（用通用学术语言描述要解决的科学/技术问题与目标，不含任何具体工程标识）
+
+## 方法/框架的抽象
+（把方法上升为通用的原理、模型、流程或框架；用通用术语命名各阶段/模块，不出现代码符号）
+
+## 实验与数据设定
+（明确：数据集的规模与构成、评测协议、实验环境的抽象描述；并**明确本研究结果的口径**：
+是“已完成的实验结果”还是“拟进行/示例性设定”，全篇必须与此口径一致，不得自相矛盾）
+
+## 可报告的量化结果
+（给出一组自洽、合理、可全篇统一引用的关键指标数值；若上面口径为“拟进行”，此处以“预期/示例”标注）
+
+## 术语表（中/英）
+（统一全篇使用的关键术语中英文对照）
+
+## 去标识清单
+（明确列出本篇写作中禁止出现的具体标识类型示例，供各章节自检）
+
+素材——关联工程解读（仅供你抽象提炼，严禁把其中的实现细节直接写进论文）：
+${projectBlock.isEmpty ? '（无）' : projectBlock}
+
+选定选题的相关信息：
+${draft.topicBrief.trim().isEmpty ? '（无）' : _clip(draft.topicBrief, 2000)}
+
+来源研究报告标题：${draft.sourceResearchTitle.isEmpty ? '（无）' : draft.sourceResearchTitle}
+来源研究报告正文：
+${draft.sourceBody.trim().isEmpty ? '（无）' : _clip(draft.sourceBody, 8000)}
+''',
+      },
+    ]);
+    return reply.trim();
   }
 
   /// 追加一个关联工程（去重）。不影响其它工程已有的解读摘要。
@@ -552,7 +968,8 @@ ${draft.sourceBody.trim().isEmpty ? '（无）' : _clip(draft.sourceBody, 8000)}
     if (!await dir.exists()) {
       throw Exception('工程目录不存在：$projectPath');
     }
-    final context = await compute(_collectProjectContext, projectPath);
+    final rg = await Ripgrep.instance.exePath();
+    final context = await compute(_collectProjectContext, (projectPath, rg));
     if (context.trim().isEmpty) throw Exception('工程内未找到可解读的文件');
     final reply = await _chat([
       {
@@ -587,8 +1004,9 @@ $context
   /// 在后台 isolate 遍历实验工程，收集用于解读的关键文件内容（含路径）。
   /// 优先文档与依赖清单、配置，再按文件名关键词挑选训练/模型/实验类源码，
   /// 控制总字数预算，避免超出模型上下文。
-  static String _collectProjectContext(String rootPath) {
-    const ignore = CodeIndexService.ignoreDirs;
+  static String _collectProjectContext((String, String) msg) {
+    final rootPath = msg.$1;
+    final rgExe = msg.$2;
     const srcExts = {
       '.py', '.dart', '.js', '.ts', '.tsx', '.jsx', '.java', '.kt', '.go',
       '.rs', '.cpp', '.c', '.h', '.hpp', '.cc', '.m', '.scala', '.cs', '.rb',
@@ -610,40 +1028,28 @@ $context
     final configs = <File>[];
     final scored = <(int, File)>[];
 
-    void walk(Directory dir, int depth) {
-      List<FileSystemEntity> entries;
-      try {
-        entries = dir.listSync(followLinks: false);
-      } catch (_) {
-        return;
-      }
-      for (final e in entries) {
-        final name = p.basename(e.path);
-        final lower = name.toLowerCase();
-        if (e is Directory) {
-          if (ignore.contains(name) || name.startsWith('.')) continue;
-          if (depth < 4) walk(e, depth + 1);
-        } else if (e is File) {
-          final ext = p.extension(lower);
-          if (lower.startsWith('readme') || (ext == '.md' && depth <= 1)) {
-            docs.add(e);
-          } else if (manifestNames.contains(lower)) {
-            manifests.add(e);
-          } else if (['.yaml', '.yml', '.toml', '.ini', '.cfg'].contains(ext) ||
-              (ext == '.json' && depth <= 2)) {
-            configs.add(e);
-          } else if (srcExts.contains(ext)) {
-            var score = depth <= 1 ? 1 : 0;
-            for (final k in keywords) {
-              if (lower.contains(k)) score += 2;
-            }
-            scored.add((score, e));
-          }
+    for (final rel in Ripgrep.listFilesSync(rgExe, rootPath)) {
+      final depth = '/'.allMatches(rel).length;
+      if (depth > 4) continue;
+      final name = p.basename(rel);
+      final lower = name.toLowerCase();
+      final ext = p.extension(lower);
+      final file = File(p.join(rootPath, rel));
+      if (lower.startsWith('readme') || (ext == '.md' && depth <= 1)) {
+        docs.add(file);
+      } else if (manifestNames.contains(lower)) {
+        manifests.add(file);
+      } else if (['.yaml', '.yml', '.toml', '.ini', '.cfg'].contains(ext) ||
+          (ext == '.json' && depth <= 2)) {
+        configs.add(file);
+      } else if (srcExts.contains(ext)) {
+        var score = depth <= 1 ? 1 : 0;
+        for (final k in keywords) {
+          if (lower.contains(k)) score += 2;
         }
+        scored.add((score, file));
       }
     }
-
-    walk(Directory(rootPath), 0);
     scored.sort((a, b) => b.$1.compareTo(a.$1));
 
     final buf = StringBuffer();
@@ -695,29 +1101,71 @@ $context
     notifyListeners();
   }
 
-  Future<List<String>> export() async {
+  /// 导出 PDF（按语种）：Markdown 论文走 pandoc 管线（表格/公式/标题排版更规范），
+  /// LaTeX 论文仍走 xelatex。图表会作为高清图嵌入。
+  Future<List<String>> exportPdf(PaperLang lang) async {
     final draft = current;
     if (draft == null) throw StateError('未打开论文');
-    final dir = Directory(p.join(settings.vaultPath, '4-书稿', '论文'));
-    await dir.create(recursive: true);
-    final baseName = _sanitize(draft.titleZh);
-    final enFile = File(p.join(dir.path, '$baseName-英文稿.pdf'));
-    final zhFile = File(p.join(dir.path, '$baseName-中文稿.pdf'));
-    await _compileLatexPdf(
-      tex: _renderEnglishLatexDocument(draft),
-      output: enFile,
-      jobName: 'paper_en',
-    );
-    await _compileLatexPdf(
-      tex: _renderChineseLatexDocument(draft),
-      output: zhFile,
-      jobName: 'paper_zh',
-    );
-    await _openExportDirectory(dir.path);
-    return [enFile.path, zhFile.path];
+    _begin('正在导出 PDF…');
+    try {
+      final dir = Directory(p.join(settings.vaultPath, '4-书稿', '论文'));
+      await dir.create(recursive: true);
+      final baseName = _sanitize(draft.titleZh);
+      final outputs = <String>[];
+      if (lang.writeZh) {
+        stage = '正在导出中文 PDF…';
+        notifyListeners();
+        outputs.add(await _exportOnePdf(
+          draft,
+          english: false,
+          output: File(p.join(dir.path, '$baseName-中文稿.pdf')),
+          jobName: 'paper_zh',
+        ));
+      }
+      if (lang.writeEn) {
+        stage = '正在导出英文 PDF…';
+        notifyListeners();
+        outputs.add(await _exportOnePdf(
+          draft,
+          english: true,
+          output: File(p.join(dir.path, '$baseName-英文稿.pdf')),
+          jobName: 'paper_en',
+        ));
+      }
+      await _openExportDirectory(dir.path);
+      stage = '已导出 ${outputs.length} 个 PDF';
+      return outputs;
+    } finally {
+      _end();
+    }
   }
 
-  /// 导出 Markdown：中文稿、英文稿各一份 .md，写入导出目录并打开。
+  Future<String> _exportOnePdf(
+    PaperDraft draft, {
+    required bool english,
+    required File output,
+    required String jobName,
+  }) async {
+    if (draft.format == PaperFormat.markdown) {
+      await _pandocPdf(
+        markdown: _cleanMarkdownDoc(draft, english: english, forExport: true),
+        output: output,
+        jobName: jobName,
+        english: english,
+      );
+    } else {
+      await _compileLatexPdf(
+        tex: english
+            ? _renderEnglishLatexDocument(draft)
+            : _renderChineseLatexDocument(draft),
+        output: output,
+        jobName: jobName,
+      );
+    }
+    return output.path;
+  }
+
+  /// 导出 Markdown：中文稿、英文稿各一份 .md（含图表引用），写入导出目录并打开。
   Future<List<String>> exportMarkdown() async {
     final draft = current;
     if (draft == null) throw StateError('未打开论文');
@@ -726,27 +1174,108 @@ $context
     final baseName = _sanitize(draft.titleZh);
     final zhFile = File(p.join(dir.path, '$baseName-中文稿.md'));
     final enFile = File(p.join(dir.path, '$baseName-英文稿.md'));
-    await zhFile.writeAsString(_markdownDoc(draft, english: false));
-    await enFile.writeAsString(_markdownDoc(draft, english: true));
+    await zhFile.writeAsString(
+      _cleanMarkdownDoc(draft, english: false, forExport: true),
+    );
+    await enFile.writeAsString(
+      _cleanMarkdownDoc(draft, english: true, forExport: true),
+    );
     await _openExportDirectory(dir.path);
     return [zhFile.path, enFile.path];
   }
 
-  /// 生成单语言 Markdown 文档（题目 + 各章节正文），用于导出。
-  String _markdownDoc(PaperDraft draft, {required bool english}) {
+  /// 生成干净的单语言 Markdown 文档：标题 + 各节（去除重复标题）+ 归属该节的图表。
+  /// [forExport] 为 true 时用绝对路径嵌入图片，供 pandoc / md 导出。
+  String _cleanMarkdownDoc(
+    PaperDraft draft, {
+    required bool english,
+    required bool forExport,
+  }) {
     final buf = StringBuffer()
       ..writeln('# ${english ? draft.titleEn : draft.titleZh}')
       ..writeln();
+    final emitted = <String>{};
     for (final section in draft.sections) {
       final title = english ? section.enTitle : section.zhTitle;
-      final body = (english ? section.en : section.zh).trim();
+      final rawBody = (english ? section.en : section.zh).trim();
+      final body = _dedupeSectionHeading(rawBody, section);
       buf
         ..writeln('## $title')
         ..writeln()
         ..writeln(body.isEmpty ? (english ? '(To be written)' : '（待撰写）') : body)
         ..writeln();
+      final kind = _sectionKind(section);
+      if (kind.isNotEmpty) {
+        for (final fig in draft.figures.where(
+          (f) => f.hasImage && f.section == kind,
+        )) {
+          buf
+            ..writeln(_figureMarkdown(fig, english: english, absolute: forExport))
+            ..writeln();
+          emitted.add(fig.id);
+        }
+      }
+    }
+    // 未归属到任何章节的图，统一附在文末。
+    final leftover =
+        draft.figures.where((f) => f.hasImage && !emitted.contains(f.id));
+    for (final fig in leftover) {
+      buf
+        ..writeln(_figureMarkdown(fig, english: english, absolute: forExport))
+        ..writeln();
     }
     return buf.toString();
+  }
+
+  /// 单张图的 Markdown（图片 + 图题）。[absolute] 决定图片路径用绝对路径。
+  String _figureMarkdown(
+    PaperFigure fig, {
+    required bool english,
+    required bool absolute,
+  }) {
+    final title = english ? fig.titleEn : fig.titleZh;
+    final caption = english ? fig.captionEn : fig.captionZh;
+    final label = title.isEmpty ? fig.id : title;
+    final src = absolute
+        ? fig.pngPath.replaceAll('\\', '/')
+        : Uri.file(fig.pngPath).toString();
+    final full = caption.trim().isEmpty ? label : '$label：$caption';
+    return '![$full]($src)';
+  }
+
+  /// 去掉章节正文开头重复的标题行（Markdown 标题或纯文本标题），避免 PDF 中标题重复。
+  static String _dedupeSectionHeading(String body, PaperSection section) {
+    if (body.trim().isEmpty) return body;
+    final lines = body.replaceAll('\r\n', '\n').split('\n');
+    var start = 0;
+    while (start < lines.length) {
+      final line = lines[start].trim();
+      if (line.isEmpty) {
+        start++;
+        continue;
+      }
+      final headingText = RegExp(r'^#{1,6}\s+(.+)$').firstMatch(line)?.group(1) ??
+          line;
+      final norm = _stripSectionNumber(headingText).trim();
+      final zh = _stripSectionNumber(section.zhTitle).trim();
+      final en = _stripSectionNumber(section.enTitle).trim();
+      final isHeading = line.startsWith('#');
+      final matches = norm == zh ||
+          norm.toLowerCase() == en.toLowerCase() ||
+          (isHeading && (norm.contains(zh) || (en.isNotEmpty &&
+              norm.toLowerCase().contains(en.toLowerCase()))));
+      // 仅当该行本身是标题行、或纯粹等于本节标题时才剥离。
+      if (isHeading && matches) {
+        start++;
+        continue;
+      }
+      if (!isHeading && (norm == zh || norm.toLowerCase() == en.toLowerCase())) {
+        start++;
+        continue;
+      }
+      break;
+    }
+    return lines.sublist(start).join('\n').trim();
   }
 
   String renderPreview(PaperDraft draft, {bool english = false}) {
@@ -759,7 +1288,6 @@ $context
   Future<void> _planPaper(PaperDraft draft) async {
     stage = '正在拟定 SCI 论文题目与章节结构…';
     notifyListeners();
-    final projectBlock = _combinedProjectDigest(draft, 10000);
     final hasChosenTitle = draft.titleZh.trim().isNotEmpty &&
         draft.titleZh.trim() != '未命名论文' &&
         !draft.titleZh.startsWith('论文草稿：');
@@ -769,30 +1297,27 @@ $context
     final reply = await _chat([
       {
         'role': 'system',
-        'content': '你是资深 SCI 期刊论文编辑，擅长结合真实工程实现与研究报告规划标准期刊论文。只输出 JSON，不要解释。',
+        'content':
+            '你是资深 SCI 期刊论文编辑。你依据「统一研究设定/事实基线」规划一篇抽象、'
+            '高于任何具体工程实现的标准学术论文结构。只输出 JSON，不要解释。',
       },
       {
         'role': 'user',
         'content':
             '''
-请结合下面的材料，拟定一个适合 SCI 期刊论文的中文题目、英文题目，并规划论文结构。
+请依据下面的「统一研究设定/事实基线」，拟定适合 SCI 期刊论文的中文题目、英文题目，并规划论文结构。
 
 要求：
 $titleRule
-- 结构与各节写作要点要贴合关联工程的真实实现（方法、实验设置、结果应可由工程支撑），不要空泛。
+- 论文须高于并独立于任何具体工程：结构与各节要点用通用学术语言，不出现文件名/函数/库版本/机器型号/“本工程”等实现痕迹。
 - sections 必须覆盖标准 SCI 论文套路：摘要、关键词、引言、相关工作、方法或框架、实验或评价、结果、讨论、结论、参考文献。
-- 每个 section 给出 zhTitle、enTitle、brief（brief 用中文写清本节要点，并尽量点到可用的工程支撑）。
+- 每个 section 给出 zhTitle、enTitle、brief（brief 用中文写清本节要点，须与研究基线一致、不夸大、不矛盾）。
 
 严格输出 JSON：
 {"titleZh":"...","titleEn":"...","sections":[{"zhTitle":"摘要","enTitle":"Abstract","brief":"本节写作要点"}]}
-${draft.topicBrief.trim().isEmpty ? '' : '\n选定选题的相关信息（研究问题/创新点/工程支撑/关键词）：\n${_clip(draft.topicBrief, 2000)}\n'}
-关联工程真实解读：
-${projectBlock.isEmpty ? '（无）' : projectBlock}
 
-研究报告标题：${draft.sourceResearchTitle.isEmpty ? '（无）' : draft.sourceResearchTitle}
-
-研究报告正文：
-${draft.sourceBody.trim().isEmpty ? '（无）' : _clip(draft.sourceBody, 14000)}
+统一研究设定 / 事实基线：
+${draft.factBaseline.trim().isEmpty ? '（无）' : _clip(draft.factBaseline, 9000)}
 ''',
       },
     ], jsonMode: true);
@@ -898,14 +1423,23 @@ ${draft.sourceBody.trim().isEmpty ? '（无）' : _clip(draft.sourceBody, 14000)
 
   String _chineseSystem(PaperDraft draft) {
     final syntax = draft.format == PaperFormat.latex ? 'LaTeX 片段' : 'Markdown';
-    return '你是严谨的中文 SCI 论文写作助手。直接输出本节中文$syntax正文，不要解释，不要输出代码围栏。';
+    return '你是严谨的中文 SCI 论文写作助手。论文必须高于并独立于任何具体工程实现：'
+        '严禁出现具体文件名/路径、函数名/类名、库及版本号、CPU/机器型号、“本工程/本项目/工程迭代”等实现痕迹，'
+        '把实现细节上升为通用方法与原理。所有数据、设定、结论必须与给定的「研究设定基线」完全一致，前后不矛盾、不夸大。'
+        '直接输出本节中文$syntax正文，不要解释，不要输出代码围栏，不要重复本节标题。';
   }
 
   String _englishSystem(PaperDraft draft) {
     final syntax = draft.format == PaperFormat.latex
         ? 'LaTeX fragment'
         : 'Markdown';
-    return 'You are a rigorous SCI journal paper writing assistant. Output only the English $syntax content for the requested section. Do not explain and do not wrap it in code fences.';
+    return 'You are a rigorous SCI journal paper writing assistant. The paper must stay abstract and '
+        'independent of any concrete engineering implementation: never mention concrete file names/paths, '
+        'function/class names, library or version numbers, CPU/machine models, or phrases like "this project". '
+        'Elevate implementation details into general methods and principles. All data, settings, and conclusions '
+        'must stay fully consistent with the given research baseline, without contradiction or exaggeration. '
+        'Output only the English $syntax content for the requested section. Do not explain, do not wrap it in code '
+        'fences, and do not repeat the section title.';
   }
 
   /// 把所有关联工程的解读拼成一段（每工程以 `## 工程：{name}` 分隔），总量封顶。
@@ -939,21 +1473,14 @@ ${draft.sourceBody.trim().isEmpty ? '（无）' : _clip(draft.sourceBody, 14000)
         : (english
               ? 'Use clean Markdown suitable for journal manuscript preview.'
               : '使用清晰 Markdown，适合期刊论文稿件预览。');
-    final combinedDigest = _combinedProjectDigest(draft, 9000);
-    final hasDigest = combinedDigest.trim().isNotEmpty;
-    final projectBlock = !hasDigest
+    final baselineBlock = draft.factBaseline.trim().isEmpty
         ? ''
         : '''
 
-关联工程的真实解读（基于工程真实文件生成，务必据此写作，尤其是方法、实验设置、相关工作、结果等章节）：
-$combinedDigest
+统一研究设定 / 事实基线（全篇唯一事实来源，本节所有数据、设定、结论必须与之一致）：
+${_clip(draft.factBaseline, 9000)}
 ''';
-    // 有真实工程解读时，要求据此落地真实实现与实验配置；否则沿用审慎表述。
-    final evidenceRule = hasDigest
-        ? '- 方法、实验设置、结果等内容必须依据上面「关联工程的真实解读」如实撰写，'
-              '引用真实的模块/算法、数据集、超参数、评价指标、运行环境等；'
-              '严禁编造工程中不存在的数据、配置或结论；工程未体现处如实说明。'
-        : '- 不编造真实实验数据或不存在的引用；若来源报告缺少数据，用审慎表述说明需要后续实证验证。';
+    final figureBlock = _figurePromptHint(draft, section, english: english);
     return '''
 论文题目：
 ${english ? draft.titleEn : draft.titleZh}
@@ -966,15 +1493,51 @@ ${english ? section.enTitle : section.zhTitle}
 
 本节要点：
 ${section.brief}
-
-来源研究报告：
-${_clip(draft.sourceBody, 16000)}
-$projectBlock
+$baselineBlock$figureBlock
 要求：
-- 按标准 SCI 期刊论文写作套路组织内容，强调研究问题、方法、发现和学术贡献。
-$evidenceRule
-- $formatHint
+- 按标准 SCI 期刊论文写作套路组织内容，强调研究问题、方法、发现和学术贡献；语言学术、抽象、凝练。
+- 论文高于并独立于任何具体工程实现：严禁出现文件名/路径、函数/类名、库及版本号、CPU/机器型号、“本工程/本项目”等；把实现细节上升为通用方法与原理。
+- 所有数据、实验设定、结论必须严格依据上面的「统一研究设定/事实基线」，前后自洽、不夸大、不臆造，不与其它章节矛盾。
+- 不要重复输出本节标题；$formatHint
 - 只输出当前部分正文。''';
+  }
+
+  /// 若某图归属当前章节，则提示模型在正文合适位置引用（如“如图1所示”）。
+  String _figurePromptHint(
+    PaperDraft draft,
+    PaperSection section, {
+    required bool english,
+  }) {
+    final secKey = _sectionKind(section);
+    final related = draft.figures
+        .where((f) => f.hasImage && f.section == secKey)
+        .toList();
+    if (related.isEmpty) return '';
+    final names = related
+        .map((f) => english ? f.titleEn : f.titleZh)
+        .where((e) => e.trim().isNotEmpty)
+        .join(english ? ', ' : '、');
+    if (names.isEmpty) return '';
+    return english
+        ? '\n本节配有图：$names。请在正文合适处自然引用这些图（如 "as shown in Fig. X"），但不要自己插入图片语法。\n'
+        : '\n本节配有图：$names。请在正文合适处自然引用这些图（如“如图X所示”），但不要自己插入图片语法。\n';
+  }
+
+  /// 把章节归类到 methods / results / … 便于图表挂接。
+  static String _sectionKind(PaperSection section) {
+    final id = section.id.toLowerCase();
+    final en = section.enTitle.toLowerCase();
+    final zh = section.zhTitle;
+    if (id.contains('method') || en.contains('method') ||
+        en.contains('framework') || zh.contains('方法') || zh.contains('框架')) {
+      return 'methods';
+    }
+    if (id.contains('result') || en.contains('result') ||
+        id.contains('experiment') || en.contains('experiment') ||
+        en.contains('evaluation') || zh.contains('结果') || zh.contains('实验')) {
+      return 'results';
+    }
+    return '';
   }
 
   List<PaperSection> _emptySections() => [
@@ -1006,6 +1569,18 @@ $evidenceRule
         ..writeln()
         ..writeln(body.trim().isEmpty ? '（待撰写）' : body.trim())
         ..writeln();
+      final kind = _sectionKind(section);
+      if (kind.isNotEmpty) {
+        for (final fig in draft.figures.where(
+          (f) => f.hasImage && f.section == kind,
+        )) {
+          final t = english ? fig.titleEn : fig.titleZh;
+          final c = english ? fig.captionEn : fig.captionZh;
+          buf
+            ..writeln('> 🖼 ${t.isEmpty ? fig.id : t}${c.trim().isEmpty ? '' : '：$c'}')
+            ..writeln();
+        }
+      }
     }
     if (!english) {
       buf
@@ -1185,6 +1760,7 @@ $evidenceRule
     required String tex,
     required File output,
     required String jobName,
+    bool tolerant = false,
   }) async {
     final compiler = await _resolveXelatex();
     final temp = await getTemporaryDirectory();
@@ -1197,12 +1773,16 @@ $evidenceRule
     await buildDir.create(recursive: true);
     final texFile = File(p.join(buildDir.path, '$jobName.tex'));
     await texFile.writeAsString(tex);
+    final built = File(p.join(buildDir.path, '$jobName.pdf'));
+    ProcessResult? lastResult;
     for (var i = 0; i < 2; i++) {
-      final result = await Process.run(
+      lastResult = await Process.run(
         compiler,
         [
           '-interaction=nonstopmode',
-          '-halt-on-error',
+          // 容错模式下不加 -halt-on-error：让 xelatex 跳过个别错误继续排版，
+          // 最终仍能产出 best-effort 的 PDF；严格模式遇错即停以暴露语法问题。
+          if (!tolerant) '-halt-on-error',
           '-file-line-error',
           '-output-directory',
           buildDir.path,
@@ -1211,20 +1791,396 @@ $evidenceRule
         workingDirectory: buildDir.path,
         runInShell: compiler == 'xelatex',
       );
-      if (result.exitCode != 0) {
+      // 严格模式：任一遍非零退出即失败。容错模式：只看最终是否产出 PDF。
+      if (!tolerant && lastResult.exitCode != 0) {
         final logFile = File(p.join(buildDir.path, '$jobName.log'));
         throw Exception(
-          'LaTeX 编译失败：${await _latexFailureMessage(result, logFile)}',
+          'LaTeX 编译失败：${await _latexFailureMessage(lastResult, logFile)}',
         );
       }
     }
-    final built = File(p.join(buildDir.path, '$jobName.pdf'));
     if (!await built.exists()) {
+      if (tolerant) {
+        final logFile = File(p.join(buildDir.path, '$jobName.log'));
+        throw Exception(
+          'LaTeX 未能生成 PDF：${await _latexFailureMessage(lastResult!, logFile)}',
+        );
+      }
       throw Exception('LaTeX 未生成 PDF：${built.path}');
     }
     await output.parent.create(recursive: true);
     await built.copy(output.path);
   }
+
+  // ---------------------------------------------------------------------------
+  // pandoc：Markdown → PDF（表格 / 公式 / 标题排版更规范，支持嵌入图片）
+  // ---------------------------------------------------------------------------
+
+  Future<void> _pandocPdf({
+    required String markdown,
+    required File output,
+    required String jobName,
+    required bool english,
+  }) async {
+    final pandoc = await _resolvePandoc();
+    final xelatex = await _resolveXelatex();
+    final temp = await getTemporaryDirectory();
+    final buildDir = Directory(
+      p.join(
+        temp.path,
+        'mind_pandoc_${DateTime.now().microsecondsSinceEpoch}_$jobName',
+      ),
+    );
+    await buildDir.create(recursive: true);
+    final mdFile = File(p.join(buildDir.path, '$jobName.md'));
+    await mdFile.writeAsString(markdown);
+    final pdfPath = p.join(buildDir.path, '$jobName.pdf');
+    final args = <String>[
+      mdFile.path,
+      '-o', pdfPath,
+      '--pdf-engine=$xelatex',
+      '-V', 'geometry:margin=1in',
+      '-V', 'linkcolor:blue',
+      '-V', 'mainfont=Times New Roman',
+      // 中文用宋体（正文）/ 黑体（无衬线），英文稿也带上 CJK 字体以防中英混排。
+      '-V', 'CJKmainfont=SimSun',
+      '--variable', 'fontsize=12pt',
+      '--resource-path', buildDir.path,
+    ];
+    final result = await Process.run(
+      pandoc,
+      args,
+      workingDirectory: buildDir.path,
+      runInShell: pandoc == 'pandoc',
+    );
+    final built = File(pdfPath);
+    if (!await built.exists()) {
+      final err = '${result.stdout}\n${result.stderr}'.trim();
+      throw Exception('pandoc 生成 PDF 失败：${_clip(err, 1800)}');
+    }
+    await output.parent.create(recursive: true);
+    await built.copy(output.path);
+  }
+
+  Future<String> _resolvePandoc() async {
+    try {
+      final r = await Process.run('pandoc', ['--version'], runInShell: true);
+      if (r.exitCode == 0) return 'pandoc';
+    } catch (_) {}
+    final env = Platform.environment;
+    final candidates = <String>[
+      if ((env['LOCALAPPDATA'] ?? '').isNotEmpty)
+        p.join(env['LOCALAPPDATA']!, 'Pandoc', 'pandoc.exe'),
+      if ((env['ProgramFiles'] ?? '').isNotEmpty)
+        p.join(env['ProgramFiles']!, 'Pandoc', 'pandoc.exe'),
+      if ((env['ProgramFiles(x86)'] ?? '').isNotEmpty)
+        p.join(env['ProgramFiles(x86)']!, 'Pandoc', 'pandoc.exe'),
+    ];
+    for (final path in candidates) {
+      if (await File(path).exists()) return path;
+    }
+    throw Exception(
+      '未检测到 pandoc。Markdown 论文的 PDF 导出依赖 pandoc，请安装后重试：\n'
+      'winget install --id JohnMacFarlane.Pandoc\n'
+      '（或到 https://pandoc.org/installing.html 下载安装，安装后重启应用）。',
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // 图表：由模型据正文产出图谱，交给 matplotlib 出高清 PNG 并保存原图
+  // ---------------------------------------------------------------------------
+
+  /// 生成论文配图：结合全文与研究基线产出图谱（方法框架流程图 + 结果图），
+  /// 调用本机 matplotlib 出 300 DPI 高清 PNG，保存到知识库并嵌入论文。
+  Future<void> generateFigures(PaperLang lang, [PaperDraft? target]) async {
+    final draft = target ?? current;
+    if (draft == null || busy) return;
+    final english = lang == PaperLang.en;
+    final paperText = _fullPaperText(draft, english: english);
+    if (paperText.trim().isEmpty && draft.factBaseline.trim().isEmpty) {
+      stage = '请先写出稿件或确立研究基线，再生成图表';
+      notifyListeners();
+      return;
+    }
+    _begin('正在规划论文图表…');
+    try {
+      final python = await _resolvePython();
+      final specs = await _planFigures(draft, english: english);
+      if (_cancel) return;
+      if (specs.isEmpty) {
+        stage = '模型未产出可用的图表';
+        return;
+      }
+      stage = '正在用 matplotlib 渲染高清图…';
+      notifyListeners();
+      final outDir = Directory(
+        p.join(settings.vaultPath, '4-书稿', '论文', 'figures', draft.id),
+      );
+      await outDir.create(recursive: true);
+      final temp = await getTemporaryDirectory();
+      final buildDir = Directory(
+        p.join(temp.path, 'mind_figs_${DateTime.now().microsecondsSinceEpoch}'),
+      );
+      await buildDir.create(recursive: true);
+      final specFile = File(p.join(buildDir.path, 'figures.json'));
+      await specFile.writeAsString(jsonEncode({'figures': specs}));
+      final scriptFile = File(p.join(buildDir.path, 'render.py'));
+      await scriptFile.writeAsString(_pythonFigureScript);
+      final result = await Process.run(
+        python.first,
+        [...python.skip(1), scriptFile.path, specFile.path, outDir.path],
+        runInShell: true,
+      );
+      if (result.exitCode != 0) {
+        throw Exception(
+          '图表渲染失败（请确认已安装 matplotlib）：'
+          '${_clip('${result.stdout}\n${result.stderr}'.trim(), 1200)}',
+        );
+      }
+      final figures = <PaperFigure>[];
+      for (final spec in specs) {
+        final id = (spec['id'] ?? '').toString();
+        if (id.isEmpty) continue;
+        final png = File(p.join(outDir.path, '$id.png'));
+        figures.add(
+          PaperFigure(
+            id: id,
+            kind: (spec['kind'] ?? 'bar').toString(),
+            titleZh: (spec['titleZh'] ?? '').toString(),
+            titleEn: (spec['titleEn'] ?? '').toString(),
+            captionZh: (spec['captionZh'] ?? '').toString(),
+            captionEn: (spec['captionEn'] ?? '').toString(),
+            section: (spec['section'] ?? '').toString(),
+            pngPath: await png.exists() ? png.path : '',
+          ),
+        );
+      }
+      draft.figures = figures.where((f) => f.hasImage).toList();
+      draft.updatedAt = DateTime.now();
+      final ok = draft.figures.length;
+      stage = ok == 0 ? '未成功生成图表' : '已生成 $ok 张高清图并保存原图 PNG';
+      await _persist();
+    } catch (e) {
+      stage = _cancel ? '已停止' : '生成图表失败：$e';
+    } finally {
+      _end();
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _planFigures(
+    PaperDraft draft, {
+    required bool english,
+  }) async {
+    final reply = await _chat([
+      {
+        'role': 'system',
+        'content':
+            '你是科研论文的图表设计专家。你依据论文正文与研究基线设计专业、抽象的插图，'
+            '所有标签必须抽象（不得出现文件名/函数/库/机器型号等实现痕迹），且图中数据必须与正文一致。'
+            '只输出 JSON，不要解释。',
+      },
+      {
+        'role': 'user',
+        'content':
+            '''
+请为下面这篇论文设计 2-4 张专业配图，供 matplotlib 渲染。要求：
+- 必须包含 1 张“方法框架/流程图”（kind=flow，section=methods）；
+- 其余为结果图（section=results），数据取自论文正文表格/数值，须与正文完全一致；
+- 所有文字标签抽象、学术化，不出现任何具体工程实现痕迹。
+
+各 figure 字段规范（按 kind 提供对应数据）：
+- 通用：id（如 fig1）、kind、section（methods/results）、titleZh、titleEn、captionZh、captionEn
+- kind=flow：nodes（字符串数组，流程节点，用通用术语）、edges（如 [[0,1],[1,2]]）
+- kind=bar：categories（字符串数组）、series（[{"name":"","values":[数值]}]，单序列即可）、ylabel
+- kind=grouped_bar：categories、series（多个 {"name","values"}）、ylabel
+- kind=line：x（数组）、series（[{"name","values"}]）、xlabel、ylabel
+- kind=heatmap 或 confusion：xlabels、ylabels、matrix（二维数值数组）
+
+严格输出 JSON：{"figures":[ {...}, {...} ]}
+
+统一研究设定 / 事实基线：
+${draft.factBaseline.trim().isEmpty ? '（无）' : _clip(draft.factBaseline, 4000)}
+
+论文正文：
+${paperText(draft, english)}
+''',
+      },
+    ], jsonMode: true);
+    final obj = _parseJson(reply);
+    final list = <Map<String, dynamic>>[];
+    for (final raw in ((obj['figures'] as List?) ?? []).whereType<Map>()) {
+      list.add(raw.cast<String, dynamic>());
+    }
+    return list;
+  }
+
+  String paperText(PaperDraft draft, bool english) =>
+      _clip(_fullPaperText(draft, english: english), 12000);
+
+  Future<List<String>> _resolvePython() async {
+    for (final cmd in [
+      ['python'],
+      ['py', '-3'],
+      ['python3'],
+    ]) {
+      try {
+        final r = await Process.run(
+          cmd.first,
+          [...cmd.skip(1), '--version'],
+          runInShell: true,
+        );
+        if (r.exitCode == 0) return cmd;
+      } catch (_) {}
+    }
+    throw Exception('未检测到 Python。生成图表依赖本机 Python + matplotlib，请安装后重试。');
+  }
+
+  static const String _pythonFigureScript = r'''
+import sys, json, os
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
+import numpy as np
+
+plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
+DPI = 300
+
+
+def _save(fig, path):
+    fig.savefig(path, dpi=DPI, bbox_inches="tight")
+    plt.close(fig)
+
+
+def draw_flow(spec, path):
+    nodes = spec.get("nodes", [])
+    edges = spec.get("edges", [])
+    n = len(nodes)
+    if n == 0:
+        return
+    fig, ax = plt.subplots(figsize=(6.2, max(2.2, n * 1.15)))
+    ax.axis("off")
+    ys = []
+    h = 0.72
+    for i, label in enumerate(nodes):
+        y = n - i
+        ys.append(y)
+        box = FancyBboxPatch((0.5, y - h / 2), 3.0, h,
+                             boxstyle="round,pad=0.12",
+                             fc="#E8F1FF", ec="#2B6CB0", lw=1.6)
+        ax.add_patch(box)
+        ax.text(2.0, y, label, ha="center", va="center", fontsize=11)
+    if not edges:
+        edges = [[i, i + 1] for i in range(n - 1)]
+    for e in edges:
+        a, b = int(e[0]), int(e[1])
+        if 0 <= a < n and 0 <= b < n:
+            arr = FancyArrowPatch((2.0, ys[a] - h / 2), (2.0, ys[b] + h / 2),
+                                  arrowstyle="-|>", mutation_scale=16,
+                                  lw=1.5, color="#2B6CB0")
+            ax.add_patch(arr)
+    ax.set_xlim(0, 4)
+    ax.set_ylim(0.2, n + 0.9)
+    _save(fig, path)
+
+
+def draw_bar(spec, path):
+    cats = spec.get("categories", [])
+    series = spec.get("series", [])
+    if not series and "values" in spec:
+        series = [{"name": "", "values": spec["values"]}]
+    fig, ax = plt.subplots(figsize=(6.4, 4.2))
+    x = np.arange(len(cats))
+    palette = ["#4C78A8", "#F58518", "#54A24B", "#E45756", "#72B7B2"]
+    if len(series) <= 1:
+        vals = series[0]["values"] if series else []
+        ax.bar(x, vals, color=palette[0], width=0.6)
+        for xi, v in zip(x, vals):
+            ax.text(xi, v, str(v), ha="center", va="bottom", fontsize=9)
+    else:
+        w = 0.8 / len(series)
+        for i, s in enumerate(series):
+            ax.bar(x + i * w - 0.4 + w / 2, s["values"], w,
+                   label=s.get("name", ""), color=palette[i % len(palette)])
+        ax.legend()
+    ax.set_xticks(x)
+    ax.set_xticklabels(cats)
+    if spec.get("ylabel"):
+        ax.set_ylabel(spec["ylabel"])
+    if spec.get("titleZh"):
+        ax.set_title(spec["titleZh"])
+    ax.grid(axis="y", ls="--", alpha=0.4)
+    _save(fig, path)
+
+
+def draw_line(spec, path):
+    x = spec.get("x", [])
+    fig, ax = plt.subplots(figsize=(6.4, 4.2))
+    for s in spec.get("series", []):
+        ax.plot(x, s["values"], marker="o", lw=1.8, label=s.get("name", ""))
+    if spec.get("series"):
+        ax.legend()
+    ax.set_xlabel(spec.get("xlabel", ""))
+    ax.set_ylabel(spec.get("ylabel", ""))
+    if spec.get("titleZh"):
+        ax.set_title(spec["titleZh"])
+    ax.grid(ls="--", alpha=0.4)
+    _save(fig, path)
+
+
+def draw_heatmap(spec, path):
+    m = np.array(spec.get("matrix", []), dtype=float)
+    if m.size == 0:
+        return
+    xl = spec.get("xlabels", [])
+    yl = spec.get("ylabels", [])
+    fig, ax = plt.subplots(figsize=(5.4, 4.4))
+    im = ax.imshow(m, cmap="Blues")
+    if xl:
+        ax.set_xticks(range(len(xl)))
+        ax.set_xticklabels(xl)
+    if yl:
+        ax.set_yticks(range(len(yl)))
+        ax.set_yticklabels(yl)
+    mx = m.max() if m.size else 1
+    for i in range(m.shape[0]):
+        for j in range(m.shape[1]):
+            v = m[i, j]
+            txt = str(int(v)) if float(v).is_integer() else str(round(v, 2))
+            ax.text(j, i, txt, ha="center", va="center",
+                    color="white" if v > mx / 2 else "black")
+    if spec.get("titleZh"):
+        ax.set_title(spec["titleZh"])
+    fig.colorbar(im)
+    _save(fig, path)
+
+
+def main():
+    specs_path, outdir = sys.argv[1], sys.argv[2]
+    os.makedirs(outdir, exist_ok=True)
+    with open(specs_path, encoding="utf-8") as f:
+        data = json.load(f)
+    for spec in data.get("figures", []):
+        kind = spec.get("kind", "bar")
+        fid = spec.get("id", "fig")
+        path = os.path.join(outdir, fid + ".png")
+        try:
+            if kind == "flow":
+                draw_flow(spec, path)
+            elif kind in ("heatmap", "confusion"):
+                draw_heatmap(spec, path)
+            elif kind == "line":
+                draw_line(spec, path)
+            else:
+                draw_bar(spec, path)
+            print("OK", fid)
+        except Exception as e:
+            print("ERR", fid, str(e))
+
+
+main()
+''';
 
   Future<String> _latexFailureMessage(
     ProcessResult result,
@@ -1484,10 +2440,105 @@ $evidenceRule
   }
 
   static String _latexInline(String value) {
-    final text = _stripInlineMarkdown(value);
-    final hasLatex = RegExp(r'\\[a-zA-Z]+|\\[()\[\]]|\$[^$]+\$').hasMatch(text);
-    if (hasLatex) return text;
-    return _latexText(text);
+    return _escapeLatexKeepingMath(_stripInlineMarkdown(value));
+  }
+
+  /// 转义纯文本里的 LaTeX 特殊字符，但原样保留行内/行间公式（`$...$`、`\(...\)`、
+  /// `\[...\]`）以及已有的 LaTeX 命令与其 {} / [] 参数。避免把 Markdown 正文里的
+  /// `_`、`%`、`&`、`#` 等直接送进 LaTeX 造成 “Missing $ inserted” 等编译错误。
+  static final RegExp _latexCommandPrefix = RegExp(r'\\[a-zA-Z]+\*?');
+
+  /// 修复 LLM 在 Markdown 里常写出的残缺行内公式：给后面没有参数的上/下标符号
+  /// （`^`、`_`）补一个空组 `{}`，并去掉公式末尾孤立的反斜杠，避免 xelatex 报
+  /// “Missing { inserted” 或未闭合命令而中断整篇编译。
+  static String _sanitizeMathBody(String math) {
+    var m = math;
+    // `^` / `_` 后面紧跟空白、闭合括号或到结尾（即缺少上/下标参数）时补 `{}`；
+    // 不动 `^\alpha`、`x^2`、`x^{...}` 这类本就合法的写法。
+    m = m.replaceAllMapped(
+      RegExp(r'[_^](?=\s|\)|\]|$)'),
+      (match) => '${match.group(0)}{}',
+    );
+    // 去掉结尾孤立的反斜杠（非合法命令的残留）。
+    m = m.replaceFirst(RegExp(r'\\+\s*$'), '');
+    return m;
+  }
+
+  static String _escapeLatexKeepingMath(String s) {
+    final buf = StringBuffer();
+    var i = 0;
+    while (i < s.length) {
+      final ch = s[i];
+      // 行内公式 $...$（成对才视为公式，孤立的 $ 走转义分支）。
+      if (ch == r'$') {
+        final end = s.indexOf(r'$', i + 1);
+        if (end > i) {
+          buf.write('\$${_sanitizeMathBody(s.substring(i + 1, end))}\$');
+          i = end + 1;
+          continue;
+        }
+      }
+      if (ch == '\\' && i + 1 < s.length) {
+        final next = s[i + 1];
+        // \( ... \) 与 \[ ... \] 公式，原样保留（并修复残缺的上下标）。
+        if (next == '(' || next == '[') {
+          final close = next == '(' ? r'\)' : r'\]';
+          final end = s.indexOf(close, i + 2);
+          if (end > i) {
+            final open = s.substring(i, i + 2);
+            buf.write('$open${_sanitizeMathBody(s.substring(i + 2, end))}$close');
+            i = end + 2;
+            continue;
+          }
+        }
+        // \command 及其紧跟的 {...} / [...] 参数（含嵌套）原样保留。
+        final cmd = _latexCommandPrefix.matchAsPrefix(s, i);
+        if (cmd != null) {
+          buf.write(cmd.group(0));
+          var j = cmd.end;
+          while (j < s.length && (s[j] == '{' || s[j] == '[')) {
+            final open = s[j];
+            final closeCh = open == '{' ? '}' : ']';
+            var depth = 0;
+            final start = j;
+            while (j < s.length) {
+              if (s[j] == open) {
+                depth++;
+              } else if (s[j] == closeCh) {
+                depth--;
+                if (depth == 0) {
+                  j++;
+                  break;
+                }
+              }
+              j++;
+            }
+            buf.write(s.substring(start, j));
+          }
+          i = j;
+          continue;
+        }
+        // \ 后跟非字母（如 \\、\%、\_、\&、\$ 等）：两字符原样保留。
+        buf.write(s.substring(i, i + 2));
+        i += 2;
+        continue;
+      }
+      buf.write(switch (ch) {
+        '{' => r'\{',
+        '}' => r'\}',
+        '&' => r'\&',
+        '%' => r'\%',
+        '#' => r'\#',
+        '_' => r'\_',
+        r'$' => r'\$',
+        '~' => r'\textasciitilde{}',
+        '^' => r'\textasciicircum{}',
+        '\\' => r'\textbackslash{}',
+        _ => ch,
+      });
+      i++;
+    }
+    return buf.toString();
   }
 
   static String _latexEnvironmentLine(String line) {
@@ -1657,6 +2708,21 @@ $evidenceRule
     busy = true;
     _cancel = false;
     stage = message;
+    progressLog
+      ..clear()
+      ..add(message);
+    notifyListeners();
+  }
+
+  /// 追加一行实时进度，同时让状态栏这一行持续变化（让用户看到"在动"）。
+  void _pushProgress(String line) {
+    final t = line.trim();
+    if (t.isEmpty) return;
+    progressLog.add(t);
+    if (progressLog.length > 200) {
+      progressLog.removeRange(0, progressLog.length - 200);
+    }
+    stage = t;
     notifyListeners();
   }
 

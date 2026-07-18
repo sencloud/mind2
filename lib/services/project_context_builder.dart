@@ -8,6 +8,7 @@ import 'agent/model_client.dart';
 import 'agent/tools/fs_helper.dart';
 import 'code_index_service.dart';
 import 'project_doc_store.dart';
+import 'ripgrep.dart';
 import 'settings_service.dart';
 
 /// 为「主题研究挂接工程」构建两类上下文：
@@ -72,7 +73,8 @@ class ProjectContextBuilder {
         ..writeln('路径：$path');
 
       try {
-        final overview = await compute(CodeIndexService.overviewFor, path);
+        final rg = await Ripgrep.instance.exePath();
+        final overview = await compute(CodeIndexService.overviewFor, (path, rg));
         if (overview.trim().isNotEmpty) {
           buf
             ..writeln('【目录结构】')
@@ -221,7 +223,8 @@ class ProjectContextBuilder {
       final name = p.basename(path);
       String overview = '';
       try {
-        overview = await compute(CodeIndexService.overviewFor, path);
+        final rg = await Ripgrep.instance.exePath();
+        overview = await compute(CodeIndexService.overviewFor, (path, rg));
       } catch (_) {}
 
       log?.call('  对照工程「$name」：规划本地检索意图…');

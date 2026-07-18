@@ -254,7 +254,8 @@ class _PaperPageState extends State<PaperPage> {
             onPressed: svc.busy ? null : svc.closePaper,
             icon: const Icon(Icons.arrow_back, size: 18),
           ),
-          Expanded(
+          Flexible(
+            flex: 2,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -269,56 +270,142 @@ class _PaperPageState extends State<PaperPage> {
                 ),
                 Text(
                   '${draft.format.label} · ${draft.doneSections}/${draft.sections.length} 节 · 约 ${draft.totalWords} 字词',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 11.5, color: _muted),
                 ),
               ],
             ),
           ),
-          OutlinedButton.icon(
-            onPressed: svc.busy ? null : () => _chooseTopic(svc, draft),
-            icon: const Icon(Icons.lightbulb_outline, size: 15),
-            label: const Text('选择论文主题'),
-          ),
           const SizedBox(width: 8),
-          OutlinedButton.icon(
-            onPressed: svc.busy
-                ? null
-                : () => svc.generateTitleAndOutline(draft),
-            icon: const Icon(Icons.schema_outlined, size: 15),
-            label: const Text('生成结构'),
-          ),
-          const SizedBox(width: 8),
-          FilledButton.icon(
-            onPressed: svc.busy ? null : () => svc.writeBilingualDraft(draft),
-            style: FilledButton.styleFrom(backgroundColor: _accent),
-            icon: const Icon(Icons.auto_awesome, size: 15),
-            label: const Text('写双语稿'),
-          ),
-          const SizedBox(width: 8),
-          _projectButton(svc, draft),
-          const SizedBox(width: 8),
-          PopupMenuButton<String>(
-            enabled: !svc.busy,
-            tooltip: '导出',
-            onSelected: (v) {
-              if (v == 'pdf') _export(svc);
-              if (v == 'md') _exportMarkdown(svc);
-            },
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'pdf', child: Text('导出 PDF')),
-              PopupMenuItem(value: 'md', child: Text('导出 Markdown')),
-            ],
-            child: OutlinedButton.icon(
-              onPressed: null,
-              style: OutlinedButton.styleFrom(
-                disabledForegroundColor: svc.busy ? null : _ink,
-              ),
-              icon: const Icon(Icons.ios_share, size: 15),
-              label: const Text('导出 ▾'),
+          // 按钮较多，用 Wrap 自动换行，保证任何宽度下都完整可见、可点、不溢出。
+          Flexible(
+            flex: 6,
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              alignment: WrapAlignment.end,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: _actions(svc, draft),
             ),
           ),
         ],
       ),
+    );
+  }
+
+  List<Widget> _actions(PaperService svc, PaperDraft draft) {
+    return [
+      OutlinedButton.icon(
+        onPressed: svc.busy ? null : () => _chooseTopic(svc, draft),
+        icon: const Icon(Icons.lightbulb_outline, size: 15),
+        label: const Text('选择论文主题'),
+      ),
+      OutlinedButton.icon(
+        onPressed: svc.busy ? null : () => svc.generateTitleAndOutline(draft),
+        icon: const Icon(Icons.schema_outlined, size: 15),
+        label: const Text('生成结构'),
+      ),
+      _langMenuButton(
+        svc: svc,
+        icon: Icons.auto_awesome,
+        label: '写稿 ▾',
+        filled: true,
+        withBoth: true,
+        onZh: () => svc.writeDraft(PaperLang.zh, draft),
+        onEn: () => svc.writeDraft(PaperLang.en, draft),
+        onBoth: () => svc.writeDraft(PaperLang.both, draft),
+      ),
+      _langMenuButton(
+        svc: svc,
+        icon: Icons.rate_review_outlined,
+        label: '审校 ▾',
+        onZh: () => _runReview(svc, draft, PaperLang.zh),
+        onEn: () => _runReview(svc, draft, PaperLang.en),
+      ),
+      _langMenuButton(
+        svc: svc,
+        icon: Icons.brush_outlined,
+        label: '润色 ▾',
+        onZh: () => svc.applyPolish(PaperLang.zh, draft),
+        onEn: () => svc.applyPolish(PaperLang.en, draft),
+      ),
+      OutlinedButton.icon(
+        onPressed: svc.busy ? null : () => _generateFigures(svc, draft),
+        icon: const Icon(Icons.insert_chart_outlined, size: 15),
+        label: Text(
+          draft.figures.isEmpty ? '图表' : '图表(${draft.figures.length})',
+        ),
+      ),
+      _projectButton(svc, draft),
+      PopupMenuButton<String>(
+        enabled: !svc.busy,
+        tooltip: '导出',
+        onSelected: (v) {
+          if (v == 'pdf_zh') _export(svc, PaperLang.zh);
+          if (v == 'pdf_en') _export(svc, PaperLang.en);
+          if (v == 'md') _exportMarkdown(svc);
+        },
+        itemBuilder: (_) => const [
+          PopupMenuItem(value: 'pdf_zh', child: Text('导出中文 PDF')),
+          PopupMenuItem(value: 'pdf_en', child: Text('导出英文 PDF')),
+          PopupMenuItem(value: 'md', child: Text('导出 Markdown')),
+        ],
+        child: OutlinedButton.icon(
+          onPressed: null,
+          style: OutlinedButton.styleFrom(
+            disabledForegroundColor: svc.busy ? null : _ink,
+          ),
+          icon: const Icon(Icons.ios_share, size: 15),
+          label: const Text('导出 ▾'),
+        ),
+      ),
+    ];
+  }
+
+  /// 带「中文稿 / 英文稿 (/ 双语稿)」下拉的动作按钮。
+  Widget _langMenuButton({
+    required PaperService svc,
+    required IconData icon,
+    required String label,
+    required VoidCallback onZh,
+    required VoidCallback onEn,
+    VoidCallback? onBoth,
+    bool withBoth = false,
+    bool filled = false,
+  }) {
+    final child = filled
+        ? FilledButton.icon(
+            onPressed: null,
+            style: FilledButton.styleFrom(
+              backgroundColor: _accent,
+              disabledBackgroundColor: svc.busy ? null : _accent,
+              disabledForegroundColor: Colors.white,
+            ),
+            icon: Icon(icon, size: 15),
+            label: Text(label),
+          )
+        : OutlinedButton.icon(
+            onPressed: null,
+            style: OutlinedButton.styleFrom(
+              disabledForegroundColor: svc.busy ? null : _ink,
+            ),
+            icon: Icon(icon, size: 15),
+            label: Text(label),
+          );
+    return PopupMenuButton<String>(
+      enabled: !svc.busy,
+      onSelected: (v) {
+        if (v == 'zh') onZh();
+        if (v == 'en') onEn();
+        if (v == 'both') onBoth?.call();
+      },
+      itemBuilder: (_) => [
+        const PopupMenuItem(value: 'zh', child: Text('中文稿')),
+        const PopupMenuItem(value: 'en', child: Text('英文稿')),
+        if (withBoth) const PopupMenuItem(value: 'both', child: Text('双语稿')),
+      ],
+      child: child,
     );
   }
 
@@ -595,7 +682,7 @@ class _PaperPageState extends State<PaperPage> {
                       ],
                     ),
                     const Text(
-                      '与关联工程交互，生成可投稿的候选选题；选定后即可「生成结构」「写双语稿」。',
+                      '与关联工程交互（智能体多轮检索代码），生成可投稿的候选选题；选定后即可「生成结构」「写稿」。',
                       style: TextStyle(fontSize: 12.5, height: 1.5, color: _sub),
                     ),
                     const SizedBox(height: 12),
@@ -633,15 +720,21 @@ class _PaperPageState extends State<PaperPage> {
                         ),
                       ],
                     ),
+                    if (svc.busy) ...[
+                      const SizedBox(height: 10),
+                      _ProgressLog(lines: svc.progressLog),
+                    ],
                     const SizedBox(height: 12),
                     Flexible(
                       child: options.isEmpty
-                          ? const Center(
+                          ? Center(
                               child: Padding(
-                                padding: EdgeInsets.symmetric(vertical: 24),
+                                padding: const EdgeInsets.symmetric(vertical: 24),
                                 child: Text(
-                                  '点击上方按钮，让第二大脑结合工程生成候选选题',
-                                  style: TextStyle(
+                                  svc.busy
+                                      ? '智能体正在检索工程代码，深挖研究方向…'
+                                      : '点击上方按钮，让第二大脑结合工程生成候选选题',
+                                  style: const TextStyle(
                                       fontSize: 12.5, color: _muted),
                                 ),
                               ),
@@ -710,7 +803,7 @@ class _PaperPageState extends State<PaperPage> {
                   : () async {
                       await svc.selectTopic(option);
                       if (ctx.mounted) Navigator.of(ctx).pop();
-                      _toast('已选定主题，可点击「生成结构」或「写双语稿」');
+                      _toast('已选定主题，可点击「生成结构」或「写稿」');
                     },
               style: FilledButton.styleFrom(backgroundColor: _accent),
               child: const Text('选用此主题'),
@@ -1094,13 +1187,106 @@ class _PaperPageState extends State<PaperPage> {
     );
   }
 
-  Future<void> _export(PaperService svc) async {
+  Future<void> _export(PaperService svc, PaperLang lang) async {
     try {
-      final paths = await svc.export();
+      final paths = await svc.exportPdf(lang);
       _toast('已导出 ${paths.length} 个 PDF，并打开导出目录');
     } catch (e) {
       _toast('导出失败：$e');
     }
+  }
+
+  Future<void> _generateFigures(PaperService svc, PaperDraft draft) async {
+    final lang = draft.sections.any((s) => s.zh.trim().isNotEmpty)
+        ? PaperLang.zh
+        : PaperLang.en;
+    await svc.generateFigures(lang, draft);
+  }
+
+  /// 审校：跑 5 专家审校，完成后展示意见，并可确认让润色主笔人据此改稿。
+  Future<void> _runReview(
+    PaperService svc,
+    PaperDraft draft,
+    PaperLang lang,
+  ) async {
+    await svc.reviewPaper(lang, draft);
+    if (!mounted) return;
+    if (draft.reviewReport.trim().isEmpty) {
+      _toast(svc.stage);
+      return;
+    }
+    await _showReviewDialog(svc, draft, lang);
+  }
+
+  Future<void> _showReviewDialog(
+    PaperService svc,
+    PaperDraft draft,
+    PaperLang lang,
+  ) async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 720, maxHeight: 720),
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.rate_review_outlined, size: 18),
+                    const SizedBox(width: 8),
+                    Text(
+                      '专家审校意见（${lang == PaperLang.en ? '英文稿' : '中文稿'}）',
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const Spacer(),
+                    IconButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      icon: const Icon(Icons.close, size: 18),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: SingleChildScrollView(
+                    child: SelectableText(
+                      draft.reviewReport,
+                      style: const TextStyle(fontSize: 13, height: 1.55),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      child: const Text('稍后处理'),
+                    ),
+                    const SizedBox(width: 8),
+                    FilledButton.icon(
+                      style: FilledButton.styleFrom(backgroundColor: _accent),
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        svc.applyPolish(lang, draft);
+                      },
+                      icon: const Icon(Icons.brush_outlined, size: 15),
+                      label: const Text('让润色主笔人据此改稿'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _exportMarkdown(PaperService svc) async {
@@ -1112,6 +1298,39 @@ class _PaperPageState extends State<PaperPage> {
     }
   }
 
+}
+
+/// 实时进度日志面板：随新行滚动到底部，让用户看到智能体每一步在做什么。
+class _ProgressLog extends StatelessWidget {
+  const _ProgressLog({required this.lines});
+
+  final List<String> lines;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 128,
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF7F7F8),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFECECEE)),
+      ),
+      child: SingleChildScrollView(
+        reverse: true,
+        child: Text(
+          lines.join('\n'),
+          style: const TextStyle(
+            fontSize: 11.5,
+            height: 1.5,
+            color: Color(0xFF6B7280),
+            fontFamily: 'Consolas',
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _PaperSectionEditor extends StatefulWidget {

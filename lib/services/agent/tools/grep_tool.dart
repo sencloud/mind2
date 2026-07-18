@@ -1,11 +1,11 @@
+import 'dart:convert';
 import 'dart:io';
 
-import 'package:path/path.dart' as p;
-
+import '../../ripgrep.dart';
 import '../tool.dart';
 import 'fs_helper.dart';
 
-/// 在文件内容中按正则搜索（纯 Dart 实现，不依赖外部 ripgrep）。
+/// 在文件内容中按正则搜索（基于捆绑的 ripgrep，原生遵守 .gitignore、跳过二进制）。
 class GrepTool extends AgentTool {
   static const _limit = 200;
 
@@ -44,66 +44,72 @@ class GrepTool extends AgentTool {
   @override
   Future<ToolResult> call(Map<String, dynamic> input, ToolContext ctx) async {
     final base = resolvePath(ctx.root, (input['path'] ?? '').toString());
-    final dir = Directory(base);
-    if (!await dir.exists()) return ToolResult.error('目录不存在：$base');
-    RegExp re;
-    try {
-      re = RegExp(input['pattern'].toString(),
-          caseSensitive: input['ignore_case'] != true);
-    } catch (e) {
-      return ToolResult.error('无效正则：$e');
+    if (!await Directory(base).exists()) {
+      return ToolResult.error('目录不存在：$base');
     }
-    final fileGlob = (input['glob'] ?? '').toString().trim();
-    final fileRe = fileGlob.isEmpty ? null : globToRegExp(fileGlob);
+    final pattern = input['pattern'].toString();
     final mode = (input['output_mode'] ?? 'content').toString();
+    final glob = (input['glob'] ?? '').toString().trim();
+    final ignoreCase = input['ignore_case'] == true;
 
-    final contentLines = <String>[];
-    final fileHits = <String, int>{};
-    var truncated = false;
+    final args = <String>[
+      '--color', 'never',
+      '--path-separator', '/',
+      ...Ripgrep.noiseExcludeArgs(),
+      if (ignoreCase) '-i',
+      if (glob.isNotEmpty) ...['-g', glob],
+      switch (mode) {
+        'files_with_matches' => '-l',
+        'count' => '-c',
+        _ => '-n',
+      },
+      if (mode == 'content') '--no-heading',
+      '-e', pattern,
+      '.',
+    ];
 
+    ProcessResult result;
     try {
-      await for (final e in walkFiles(
-        dir,
-        isCancelled: ctx.isCancelled,
-        ignoreRoot: Directory(ctx.root),
-      )) {
-        if (ctx.isCancelled()) break;
-        final rel = p.relative(e.path, from: base).replaceAll('\\', '/');
-        if (fileRe != null && !fileRe.hasMatch(p.basename(rel))) continue;
-        String text;
-        try {
-          text = await e.readAsString();
-        } catch (_) {
-          continue; // 跳过二进制
-        }
-        final lines = text.split('\n');
-        for (var i = 0; i < lines.length; i++) {
-          if (!re.hasMatch(lines[i])) continue;
-          fileHits[rel] = (fileHits[rel] ?? 0) + 1;
-          if (mode == 'content') {
-            contentLines.add('$rel:${i + 1}:${lines[i]}');
-            if (contentLines.length >= _limit) {
-              truncated = true;
-              break;
-            }
-          }
-        }
-        if (truncated) break;
-      }
+      result = await Ripgrep.instance.run(args, workingDirectory: base);
     } catch (e) {
       return ToolResult.error('搜索失败：$e');
     }
+    if (ctx.isCancelled()) return ToolResult('已取消。');
+    // rg：0 有匹配、1 无匹配、>1 出错。
+    if (result.exitCode == 1) return ToolResult('无匹配。');
+    if (result.exitCode > 1) {
+      return ToolResult.error('搜索失败：${result.stderr.toString().trim()}');
+    }
 
-    if (fileHits.isEmpty) return ToolResult('无匹配。');
-    final more = truncated ? '\n…（结果已截断）' : '';
+    final lines = const LineSplitter()
+        .convert(result.stdout.toString())
+        .where((l) => l.trim().isNotEmpty)
+        .map(_stripDotPrefix)
+        .toList();
+    if (lines.isEmpty) return ToolResult('无匹配。');
+
     switch (mode) {
       case 'files_with_matches':
-        return ToolResult(fileHits.keys.join('\n'));
+        final shown = lines.take(_limit).toList();
+        final more = lines.length > _limit ? '\n…（结果已截断）' : '';
+        return ToolResult('${shown.join('\n')}$more');
       case 'count':
-        return ToolResult(
-            fileHits.entries.map((e) => '${e.value}\t${e.key}').join('\n'));
+        // rg 输出 path:count，转成 count\tpath 与旧格式一致。
+        final rows = lines.map((l) {
+          final idx = l.lastIndexOf(':');
+          if (idx <= 0) return l;
+          return '${l.substring(idx + 1)}\t${l.substring(0, idx)}';
+        });
+        return ToolResult(rows.join('\n'));
       default:
-        return ToolResult('${contentLines.join('\n')}$more');
+        final shown = lines.take(_limit).toList();
+        final more = lines.length > _limit ? '\n…（结果已截断）' : '';
+        return ToolResult('${shown.join('\n')}$more');
     }
   }
+
+  /// rg 以 `.` 为搜索根时会给路径加 `./` 前缀，去掉它。
+  /// 注意：只裁剪行首前缀，绝不改动匹配到的代码内容（内容里可能含反斜杠/冒号）。
+  static String _stripDotPrefix(String line) =>
+      line.startsWith('./') ? line.substring(2) : line;
 }

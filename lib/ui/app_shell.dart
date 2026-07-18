@@ -135,7 +135,7 @@ class _AppShellState extends State<AppShell> {
             _writingTab = 3; // 论文 tab（文档/专业书籍/小说/论文）
             _writingToken++;
           });
-          Future.microtask(() => widget.paper.writeBilingualDraft(draft));
+          Future.microtask(() => widget.paper.writeDraft(PaperLang.both, draft));
         },
         onOpenAsProject: (projectPath, researchPath, researchTitle) {
           widget.project.openFromExperiment(
