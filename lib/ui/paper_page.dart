@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
 import '../services/paper_service.dart';
+import '../services/platform_capabilities.dart';
+import 'responsive.dart';
 
 const _accent = Color(0xFF0D9488);
 const _ink = Color(0xFF2B2B2E);
@@ -20,6 +22,8 @@ class PaperPage extends StatefulWidget {
 
 class _PaperPageState extends State<PaperPage> {
   bool _previewEnglish = false;
+  // 窄屏单栏切换：0=大纲，1=正文，2=预览。
+  int _mobileTab = 0;
 
   void _toast(String msg) {
     if (!mounted) return;
@@ -213,6 +217,31 @@ class _PaperPageState extends State<PaperPage> {
 
   Widget _buildWorkspace(PaperService svc) {
     final draft = svc.current!;
+    final body = svc.activeSection == null
+        ? _overview(svc, draft)
+        : _PaperSectionEditor(
+            key: ValueKey(svc.activeSection!.id),
+            svc: svc,
+            section: svc.activeSection!,
+            busy: svc.busy,
+          );
+    if (context.isCompact) {
+      // 窄屏单栏：大纲 / 正文 / 预览 顶部切换。
+      return Column(
+        children: [
+          _topBar(svc, draft),
+          if (svc.busy || svc.stage.isNotEmpty) _statusStrip(svc),
+          _mobileTabBar(),
+          Expanded(
+            child: switch (_mobileTab) {
+              0 => _leftPanel(svc, draft, mobile: true),
+              1 => body,
+              _ => _previewPanel(svc, draft),
+            },
+          ),
+        ],
+      );
+    }
     return Column(
       children: [
         _topBar(svc, draft),
@@ -224,23 +253,32 @@ class _PaperPageState extends State<PaperPage> {
             children: [
               _leftPanel(svc, draft),
               const VerticalDivider(width: 1),
-              Expanded(
-                flex: 3,
-                child: svc.activeSection == null
-                    ? _overview(svc, draft)
-                    : _PaperSectionEditor(
-                        key: ValueKey(svc.activeSection!.id),
-                        svc: svc,
-                        section: svc.activeSection!,
-                        busy: svc.busy,
-                      ),
-              ),
+              Expanded(flex: 3, child: body),
               const VerticalDivider(width: 1),
               Expanded(flex: 2, child: _previewPanel(svc, draft)),
             ],
           ),
         ),
       ],
+    );
+  }
+
+  Widget _mobileTabBar() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: Color(0xFFECECEE))),
+      ),
+      child: SegmentedButton<int>(
+        style: const ButtonStyle(visualDensity: VisualDensity.compact),
+        segments: const [
+          ButtonSegment(value: 0, label: Text('大纲')),
+          ButtonSegment(value: 1, label: Text('正文')),
+          ButtonSegment(value: 2, label: Text('预览')),
+        ],
+        selected: {_mobileTab},
+        onSelectionChanged: (v) => setState(() => _mobileTab = v.first),
+      ),
     );
   }
 
@@ -330,14 +368,17 @@ class _PaperPageState extends State<PaperPage> {
         onZh: () => svc.applyPolish(PaperLang.zh, draft),
         onEn: () => svc.applyPolish(PaperLang.en, draft),
       ),
-      OutlinedButton.icon(
-        onPressed: svc.busy ? null : () => _generateFigures(svc, draft),
-        icon: const Icon(Icons.insert_chart_outlined, size: 15),
-        label: Text(
-          draft.figures.isEmpty ? '图表' : '图表(${draft.figures.length})',
+      // 图表依赖 python+matplotlib（桌面外部工具链），移动端隐藏。
+      if (PlatformCapabilities.supportsFigures)
+        OutlinedButton.icon(
+          onPressed: svc.busy ? null : () => _generateFigures(svc, draft),
+          icon: const Icon(Icons.insert_chart_outlined, size: 15),
+          label: Text(
+            draft.figures.isEmpty ? '图表' : '图表(${draft.figures.length})',
+          ),
         ),
-      ),
-      _projectButton(svc, draft),
+      // 关联工程解读依赖 ripgrep（桌面捆绑二进制），移动端隐藏。
+      if (PlatformCapabilities.supportsCodeSearch) _projectButton(svc, draft),
       PopupMenuButton<String>(
         enabled: !svc.busy,
         tooltip: '导出',
@@ -346,10 +387,13 @@ class _PaperPageState extends State<PaperPage> {
           if (v == 'pdf_en') _export(svc, PaperLang.en);
           if (v == 'md') _exportMarkdown(svc);
         },
-        itemBuilder: (_) => const [
-          PopupMenuItem(value: 'pdf_zh', child: Text('导出中文 PDF')),
-          PopupMenuItem(value: 'pdf_en', child: Text('导出英文 PDF')),
-          PopupMenuItem(value: 'md', child: Text('导出 Markdown')),
+        itemBuilder: (_) => [
+          // PDF 导出依赖 xelatex/pandoc（桌面），移动端仅保留 Markdown。
+          if (PlatformCapabilities.supportsPdfExport) ...const [
+            PopupMenuItem(value: 'pdf_zh', child: Text('导出中文 PDF')),
+            PopupMenuItem(value: 'pdf_en', child: Text('导出英文 PDF')),
+          ],
+          const PopupMenuItem(value: 'md', child: Text('导出 Markdown')),
         ],
         child: OutlinedButton.icon(
           onPressed: null,
@@ -357,7 +401,7 @@ class _PaperPageState extends State<PaperPage> {
             disabledForegroundColor: svc.busy ? null : _ink,
           ),
           icon: const Icon(Icons.ios_share, size: 15),
-          label: const Text('导出 ▾'),
+          label: Text(PlatformCapabilities.supportsPdfExport ? '导出 ▾' : '导出'),
         ),
       ),
     ];
@@ -846,9 +890,9 @@ class _PaperPageState extends State<PaperPage> {
     );
   }
 
-  Widget _leftPanel(PaperService svc, PaperDraft draft) {
+  Widget _leftPanel(PaperService svc, PaperDraft draft, {bool mobile = false}) {
     return SizedBox(
-      width: 260,
+      width: mobile ? double.infinity : 260,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -1001,8 +1045,10 @@ class _PaperPageState extends State<PaperPage> {
               style: const TextStyle(fontSize: 15, color: _sub, height: 1.5),
             ),
           ],
-          const SizedBox(height: 24),
-          _projectCard(svc, draft),
+          if (PlatformCapabilities.supportsCodeSearch) ...[
+            const SizedBox(height: 24),
+            _projectCard(svc, draft),
+          ],
           const SizedBox(height: 24),
           const Text(
             '论文结构',
@@ -1254,10 +1300,37 @@ class _PaperPageState extends State<PaperPage> {
                 ),
                 const SizedBox(height: 8),
                 Expanded(
-                  child: SingleChildScrollView(
-                    child: SelectableText(
-                      draft.reviewReport,
-                      style: const TextStyle(fontSize: 13, height: 1.55),
+                  child: Markdown(
+                    data: draft.reviewReport,
+                    selectable: true,
+                    padding: EdgeInsets.zero,
+                    styleSheet: MarkdownStyleSheet(
+                      p: const TextStyle(fontSize: 13, height: 1.55),
+                      h1: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w700,
+                        height: 1.4,
+                      ),
+                      h2: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                        height: 1.4,
+                      ),
+                      h3: const TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w600,
+                        height: 1.4,
+                      ),
+                      strong: const TextStyle(fontWeight: FontWeight.w700),
+                      listBullet: const TextStyle(fontSize: 13, height: 1.55),
+                      horizontalRuleDecoration: BoxDecoration(
+                        border: Border(
+                          top: BorderSide(
+                            width: 1,
+                            color: Colors.grey.shade300,
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                 ),

@@ -4,7 +4,9 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
+import '../services/platform_capabilities.dart';
 import '../services/pro_book_service.dart';
+import 'responsive.dart';
 
 // 统一配色，和写作其它页保持一致。
 const _accent = Color(0xFF0D9488);
@@ -40,6 +42,8 @@ class _ProBookPageState extends State<ProBookPage> {
   final _valueCtrl = TextEditingController();
   final _titleCtrl = TextEditingController();
   String? _kickoffBookId;
+  // 窄屏单栏切换：0=大纲，1=内容。
+  int _mobileTab = 0;
 
   @override
   void dispose() {
@@ -383,6 +387,21 @@ class _ProBookPageState extends State<ProBookPage> {
       _valueCtrl.text = book.valueProposition;
       _titleCtrl.text = book.title;
     }
+    if (context.isCompact) {
+      // 窄屏单栏：大纲 / 内容 顶部切换。
+      return Column(
+        children: [
+          _topBar(svc, book),
+          _workflowBar(svc, book),
+          _mobileTabBar(),
+          Expanded(
+            child: _mobileTab == 0
+                ? _outlinePanel(svc, book)
+                : _rightPanel(svc, book),
+          ),
+        ],
+      );
+    }
     return Column(
       children: [
         _topBar(svc, book),
@@ -399,6 +418,24 @@ class _ProBookPageState extends State<ProBookPage> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _mobileTabBar() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: Color(0xFFECECEE))),
+      ),
+      child: SegmentedButton<int>(
+        style: const ButtonStyle(visualDensity: VisualDensity.compact),
+        segments: const [
+          ButtonSegment(value: 0, label: Text('大纲')),
+          ButtonSegment(value: 1, label: Text('内容')),
+        ],
+        selected: {_mobileTab},
+        onSelectionChanged: (v) => setState(() => _mobileTab = v.first),
+      ),
     );
   }
 
@@ -480,8 +517,16 @@ class _ProBookPageState extends State<ProBookPage> {
             FilledButton.icon(
               onPressed: () => _doExport(svc),
               style: FilledButton.styleFrom(backgroundColor: _accent),
-              icon: const Icon(Icons.picture_as_pdf_outlined, size: 16),
-              label: const Text('导出 PDF'),
+              icon: Icon(
+                PlatformCapabilities.supportsPdfExport
+                    ? Icons.picture_as_pdf_outlined
+                    : Icons.description_outlined,
+                size: 16,
+              ),
+              // PDF 排版依赖 xelatex（桌面），移动端仅导出 Markdown。
+              label: Text(
+                PlatformCapabilities.supportsPdfExport ? '导出 PDF' : '导出 Markdown',
+              ),
             ),
           ],
         ],
@@ -490,6 +535,15 @@ class _ProBookPageState extends State<ProBookPage> {
   }
 
   Future<void> _doExport(ProBookService svc) async {
+    if (!PlatformCapabilities.supportsPdfExport) {
+      try {
+        final path = await svc.exportMarkdown();
+        if (mounted) _toast('已导出 Markdown：$path');
+      } catch (e) {
+        if (mounted) _toast('导出失败：$e');
+      }
+      return;
+    }
     _toast('正在按出书规范生成 PDF（首次编译可能较慢）…');
     try {
       final path = await svc.export();

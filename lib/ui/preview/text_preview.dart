@@ -82,7 +82,10 @@ class _TextPreviewState extends State<TextPreview> {
       child: SelectableText(
         _content!,
         style: const TextStyle(
-            fontSize: 13, height: 1.6, fontFamily: 'Consolas'),
+            fontSize: 13,
+            height: 1.6,
+            fontFamily: 'Consolas',
+            fontFamilyFallback: ['monospace']),
       ),
     );
   }

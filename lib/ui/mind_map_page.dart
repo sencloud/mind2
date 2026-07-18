@@ -2,6 +2,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../services/mind_map_service.dart';
+import 'responsive.dart';
 
 const _accent = Color(0xFF0D9488);
 const _sub = Color(0xFF6B6B70);
@@ -20,6 +21,8 @@ class MindMapPage extends StatefulWidget {
 class _MindMapPageState extends State<MindMapPage> {
   final _ctrl = TextEditingController();
   String? _boundId; // 已绑定到输入框的记录 id，避免重复覆盖用户输入
+  // 窄屏单栏切换：0=编辑，1=图。
+  int _mobileTab = 0;
 
   @override
   void dispose() {
@@ -201,17 +204,41 @@ class _MindMapPageState extends State<MindMapPage> {
           ),
         ),
         const Divider(height: 1, color: Color(0xFFECECEE)),
-        Expanded(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              SizedBox(width: 380, child: _inputPanel()),
-              const VerticalDivider(width: 1, color: Color(0xFFECECEE)),
-              Expanded(child: _previewPanel()),
-            ],
+        if (context.isCompact) ...[
+          _mobileTabBar(),
+          Expanded(
+            child: _mobileTab == 0 ? _inputPanel() : _previewPanel(),
           ),
-        ),
+        ] else
+          Expanded(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                SizedBox(width: 380, child: _inputPanel()),
+                const VerticalDivider(width: 1, color: Color(0xFFECECEE)),
+                Expanded(child: _previewPanel()),
+              ],
+            ),
+          ),
       ],
+    );
+  }
+
+  Widget _mobileTabBar() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: Color(0xFFECECEE))),
+      ),
+      child: SegmentedButton<int>(
+        style: const ButtonStyle(visualDensity: VisualDensity.compact),
+        segments: const [
+          ButtonSegment(value: 0, label: Text('编辑')),
+          ButtonSegment(value: 1, label: Text('图')),
+        ],
+        selected: {_mobileTab},
+        onSelectionChanged: (v) => setState(() => _mobileTab = v.first),
+      ),
     );
   }
 

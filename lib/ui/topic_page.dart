@@ -4,10 +4,12 @@ import 'package:path/path.dart' as p;
 
 import '../models.dart';
 import '../services/library_service.dart';
+import '../services/platform_capabilities.dart';
 import '../services/playwright_service.dart';
 import '../services/project_service.dart';
 import '../services/topic_service.dart';
 import 'enter_to_send.dart';
+import 'responsive.dart';
 
 class TopicPage extends StatefulWidget {
   const TopicPage({
@@ -575,8 +577,9 @@ class _TopicPageState extends State<TopicPage> {
   Widget _buildMainArea(
     TopicFetchService svc,
     ResearchRecord? viewing,
-    List<String> displayLogs,
-  ) {
+    List<String> displayLogs, {
+    bool compact = false,
+  }) {
     final showRecord = !svc.running && viewing != null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -605,6 +608,13 @@ class _TopicPageState extends State<TopicPage> {
                 onPressed: () => widget.topicService.startNew(),
                 icon: const Icon(Icons.add, size: 16),
                 label: const Text('新研究'),
+              ),
+            // 窄屏入口：打开研究历史底部弹窗。
+            if (compact)
+              IconButton(
+                tooltip: '研究历史',
+                icon: const Icon(Icons.history, size: 20),
+                onPressed: () => _openHistorySheet(svc),
               ),
           ],
         ),
@@ -674,14 +684,17 @@ class _TopicPageState extends State<TopicPage> {
             ),
           ),
           // 左下角：挂接工程加号 + 已挂接工程 Chip（横向可滚动）。
+          // 工程挂接依赖 ripgrep 检索代码（桌面），移动端隐藏加号。
           Positioned(
             left: 10,
             right: 150,
             bottom: 8,
             child: Row(
               children: [
-                _AddProjectButton(onTap: busy ? null : _pickProject),
-                const SizedBox(width: 6),
+                if (PlatformCapabilities.supportsCodeSearch) ...[
+                  _AddProjectButton(onTap: busy ? null : _pickProject),
+                  const SizedBox(width: 6),
+                ],
                 Expanded(
                   child: SingleChildScrollView(
                     scrollDirection: Axis.horizontal,
@@ -807,9 +820,33 @@ class _TopicPageState extends State<TopicPage> {
     );
   }
 
-  Widget _buildHistoryPanel(TopicFetchService svc) {
+  /// 窄屏：把研究历史面板收进底部弹窗。
+  Future<void> _openHistorySheet(TopicFetchService svc) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => DraggableScrollableSheet(
+        initialChildSize: 0.7,
+        minChildSize: 0.4,
+        maxChildSize: 0.95,
+        expand: false,
+        builder: (ctx, scrollController) => ClipRRect(
+          borderRadius:
+              const BorderRadius.vertical(top: Radius.circular(16)),
+          child: _buildHistoryPanel(svc, width: double.infinity, inSheet: true),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHistoryPanel(
+    TopicFetchService svc, {
+    double width = 312,
+    bool inSheet = false,
+  }) {
     return Container(
-      width: 312,
+      width: width,
       decoration: BoxDecoration(
         color: const Color(0xFFF7F7F8),
         borderRadius: BorderRadius.circular(14),
@@ -856,7 +893,7 @@ class _TopicPageState extends State<TopicPage> {
                       )
                     : ListView(
                         padding: const EdgeInsets.fromLTRB(10, 10, 10, 14),
-                        children: _buildHistoryRows(history, svc),
+                        children: _buildHistoryRows(history, svc, inSheet),
                       ),
               ),
             ],
@@ -868,8 +905,9 @@ class _TopicPageState extends State<TopicPage> {
 
   List<Widget> _buildHistoryRows(
     List<ResearchRecord> history,
-    TopicFetchService svc,
-  ) {
+    TopicFetchService svc, [
+    bool inSheet = false,
+  ]) {
     final rows = <Widget>[];
     String? lastGroup;
     for (final record in history) {
@@ -882,7 +920,10 @@ class _TopicPageState extends State<TopicPage> {
         _ResearchHistoryTile(
           record: record,
           selected: svc.viewing == record,
-          onOpen: () => svc.openRecord(record),
+          onOpen: () {
+            svc.openRecord(record);
+            if (inSheet) Navigator.of(context).maybePop();
+          },
           onOpenReport: record.reportPath == null
               ? null
               : () => widget.onOpenReport?.call(record.reportPath!),
@@ -915,16 +956,20 @@ class _TopicPageState extends State<TopicPage> {
         final showRecord = !svc.running && viewing != null;
         final displayLogs = showRecord ? viewing.logs : svc.logs;
         _scrollToBottom();
+        final compact = context.isCompact;
         return Padding(
-          padding: const EdgeInsets.all(32),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(child: _buildMainArea(svc, viewing, displayLogs)),
-              const SizedBox(width: 20),
-              _buildHistoryPanel(svc),
-            ],
-          ),
+          padding: EdgeInsets.all(compact ? 16 : 32),
+          child: compact
+              // 窄屏：单栏主区，历史面板收进底部弹窗（右上角历史按钮）。
+              ? _buildMainArea(svc, viewing, displayLogs, compact: true)
+              : Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(child: _buildMainArea(svc, viewing, displayLogs)),
+                    const SizedBox(width: 20),
+                    _buildHistoryPanel(svc),
+                  ],
+                ),
         );
       },
     );

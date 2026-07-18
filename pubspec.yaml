@@ -67,6 +67,29 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  # 生成安卓自适应图标与品牌启动屏（仅构建期工具，不进运行时）。
+  flutter_launcher_icons: ^0.14.1
+  flutter_native_splash: ^2.4.1
+
+# 安卓自适应图标：前景=加内边距的大脑图案（透明底），背景=纯黑；旧机型用位图。
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "assets/icon/app_icon.png"
+  adaptive_icon_background: "#0E0E10"
+  adaptive_icon_foreground: "assets/icon/app_icon_foreground.png"
+  min_sdk_android: 24
+
+# 品牌启动屏：黑底居中 logo，兼容 Android 12+ splash。
+flutter_native_splash:
+  color: "#0E0E10"
+  image: "assets/icon/app_icon_foreground.png"
+  android: true
+  ios: false
+  web: false
+  android_12:
+    color: "#0E0E10"
+    image: "assets/icon/app_icon_foreground.png"
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -86,6 +109,12 @@ flutter:
     - assets/bin/linux/rg
     - assets/bin/macos/rg
     - assets/bin/macos/rg-x64
+
+  fonts:
+    # 打包 Noto Sans SC 可变字体：桌面与安卓统一中文观感（含全字重 wght 轴）。
+    - family: Noto Sans SC
+      fonts:
+        - asset: assets/fonts/NotoSansSC.ttf
 
   # To add assets to your application, add an assets section, like this:
   # assets:

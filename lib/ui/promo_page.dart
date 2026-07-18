@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
+import '../services/platform_capabilities.dart';
 import '../services/promo_service.dart';
+import 'responsive.dart';
 
 // 统一配色，与写作其它页保持一致。
 const _accent = Color(0xFF0D9488);
@@ -28,6 +30,8 @@ class _PromoPageState extends State<PromoPage> {
   final _sellingCtrl = TextEditingController();
   final _audienceCtrl = TextEditingController();
   String? _boundDraftId;
+  // 窄屏单栏切换：0=设置，1=推文。
+  int _mobileTab = 0;
 
   /// 右侧正文视图：false=预览，true=编辑 Markdown 源码。
   bool _editing = false;
@@ -321,6 +325,21 @@ class _PromoPageState extends State<PromoPage> {
       _editing = false;
       _showLog = false;
     }
+    final right = svc.walking || _showLog
+        ? _walkLogView(svc)
+        : _postPanel(svc, draft);
+    if (context.isCompact) {
+      // 窄屏单栏：设置 / 推文 顶部切换。
+      return Column(
+        children: [
+          _topBar(svc, draft),
+          _mobileTabBar(),
+          Expanded(
+            child: _mobileTab == 0 ? _settingsPanel(svc, draft) : right,
+          ),
+        ],
+      );
+    }
     return Column(
       children: [
         _topBar(svc, draft),
@@ -331,15 +350,29 @@ class _PromoPageState extends State<PromoPage> {
             children: [
               SizedBox(width: 340, child: _settingsPanel(svc, draft)),
               const VerticalDivider(width: 1, color: Color(0xFFECECEE)),
-              Expanded(
-                child: svc.walking || _showLog
-                    ? _walkLogView(svc)
-                    : _postPanel(svc, draft),
-              ),
+              Expanded(child: right),
             ],
           ),
         ),
       ],
+    );
+  }
+
+  Widget _mobileTabBar() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: Color(0xFFECECEE))),
+      ),
+      child: SegmentedButton<int>(
+        style: const ButtonStyle(visualDensity: VisualDensity.compact),
+        segments: const [
+          ButtonSegment(value: 0, label: Text('设置')),
+          ButtonSegment(value: 1, label: Text('推文')),
+        ],
+        selected: {_mobileTab},
+        onSelectionChanged: (v) => setState(() => _mobileTab = v.first),
+      ),
     );
   }
 
@@ -451,8 +484,11 @@ class _PromoPageState extends State<PromoPage> {
                 (v) => draft.sellingPoints = v, maxLines: 3),
             _panelField('目标读者（可选）', _audienceCtrl, '这篇推文想打动谁', svc,
                 (v) => draft.audience = v),
-            const SizedBox(height: 18),
-            _projectSection(svc, draft),
+            // 走读源码依赖 ripgrep（桌面捆绑二进制），移动端隐藏该模块。
+            if (PlatformCapabilities.supportsCodeSearch) ...[
+              const SizedBox(height: 18),
+              _projectSection(svc, draft),
+            ],
             const SizedBox(height: 16),
             const Text('切入角度',
                 style: TextStyle(fontSize: 12.5, color: _sub)),

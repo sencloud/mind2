@@ -1999,6 +1999,18 @@ ${_clip(ph.section.content, 3000)}
   // ⑥ 导出为 Markdown（写入知识库根下「4-书稿/专业书籍」目录）
   // ---------------------------------------------------------------------------
 
+  /// 仅导出 Markdown（纯 Dart，移动端可用）。返回 .md 路径。
+  Future<String> exportMarkdown() async {
+    final book = current;
+    if (book == null) throw StateError('未打开书籍');
+    final dir = Directory(p.join(settings.vaultPath, '4-书稿', '专业书籍'));
+    await dir.create(recursive: true);
+    final base = _sanitize(book.title);
+    final md = File(p.join(dir.path, '$base.md'));
+    await md.writeAsString(_renderMarkdown(book));
+    return md.path;
+  }
+
   /// 导出：按出书规范用 LaTeX(ctexbook) 排版生成 PDF（同时保留一份 Markdown）。
   /// 返回 PDF 路径。需要本机已安装 xelatex（MiKTeX / TeX Live）。
   Future<String> export() async {

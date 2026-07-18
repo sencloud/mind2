@@ -122,7 +122,10 @@ class CodeView extends StatelessWidget {
             theme: githubTheme,
             padding: const EdgeInsets.all(14),
             textStyle: const TextStyle(
-                fontFamily: 'Consolas', fontSize: 12.5, height: 1.45),
+                fontFamily: 'Consolas',
+                fontFamilyFallback: ['monospace'],
+                fontSize: 12.5,
+                height: 1.45),
           ),
         ),
       ),

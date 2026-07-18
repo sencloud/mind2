@@ -11,6 +11,7 @@ import '../services/library_service.dart';
 import '../services/settings_service.dart';
 import '../services/topic_service.dart';
 import 'graph_page.dart';
+import 'responsive.dart';
 import 'skill_library_view.dart';
 
 class KnowledgePage extends StatefulWidget {
@@ -137,11 +138,12 @@ ${KnowledgeAnalyzer.summaryForAi(o)}
 
   @override
   Widget build(BuildContext context) {
+    final hPad = context.isCompact ? 16.0 : 40.0;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(40, 24, 40, 0),
+          padding: EdgeInsets.fromLTRB(hPad, 24, hPad, 0),
           child: Row(
             children: [
               const Text(
@@ -215,23 +217,30 @@ ${KnowledgeAnalyzer.summaryForAi(o)}
             ),
           );
         }
+        final compact = context.isCompact;
         return ListView(
-          padding: const EdgeInsets.fromLTRB(40, 20, 40, 40),
+          padding: EdgeInsets.fromLTRB(compact ? 16 : 40, 20, compact ? 16 : 40, 40),
           children: [
-            _buildMetrics(o),
+            _buildMetrics(o, compact),
             const SizedBox(height: 24),
             _sectionTitle('知识构成'),
             const SizedBox(height: 10),
             ...o.domains.map(_buildDomainRow),
             const SizedBox(height: 24),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(child: _buildStrengths(o)),
-                const SizedBox(width: 20),
-                Expanded(child: _buildWeaknesses(o)),
-              ],
-            ),
+            // 窄屏纵向堆叠长处/短板，宽屏并排。
+            if (compact) ...[
+              _buildStrengths(o),
+              const SizedBox(height: 14),
+              _buildWeaknesses(o),
+            ] else
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(child: _buildStrengths(o)),
+                  const SizedBox(width: 20),
+                  Expanded(child: _buildWeaknesses(o)),
+                ],
+              ),
             const SizedBox(height: 24),
             _buildDiagnosis(o),
           ],
@@ -245,7 +254,7 @@ ${KnowledgeAnalyzer.summaryForAi(o)}
     style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
   );
 
-  Widget _buildMetrics(KnowledgeOverview o) {
+  Widget _buildMetrics(KnowledgeOverview o, [bool compact = false]) {
     Widget card(String label, String value, Color color, {String? sub}) {
       return Expanded(
         child: Container(
@@ -290,35 +299,49 @@ ${KnowledgeAnalyzer.summaryForAi(o)}
       );
     }
 
+    final c1 = card(
+      '知识领域',
+      '${o.domains.length}',
+      const Color(0xFF1A1A1A),
+      sub: '${o.totalNotes} 篇笔记',
+    );
+    final c2 = card(
+      '整体掌握度',
+      '${(o.masteryRatio * 100).round()}%',
+      const Color(0xFF0D9488),
+      sub: '已读 ${o.read} · 在读 ${o.reading} · 未读 ${o.unread}',
+    );
+    final c3 = card(
+      '有原文',
+      '${o.withOriginal}',
+      const Color(0xFF14B8A6),
+      sub: '${o.totalNotes - o.withOriginal} 篇无原文',
+    );
+    final c4 = card(
+      '孤立笔记',
+      '${o.isolated}',
+      const Color(0xFFF59E0B),
+      sub: '尚未与其他笔记关联',
+    );
+    if (compact) {
+      // 窄屏 2×2 排布，避免四张卡横向挤压。
+      return Column(
+        children: [
+          Row(children: [c1, const SizedBox(width: 14), c2]),
+          const SizedBox(height: 14),
+          Row(children: [c3, const SizedBox(width: 14), c4]),
+        ],
+      );
+    }
     return Row(
       children: [
-        card(
-          '知识领域',
-          '${o.domains.length}',
-          const Color(0xFF1A1A1A),
-          sub: '${o.totalNotes} 篇笔记',
-        ),
+        c1,
         const SizedBox(width: 14),
-        card(
-          '整体掌握度',
-          '${(o.masteryRatio * 100).round()}%',
-          const Color(0xFF0D9488),
-          sub: '已读 ${o.read} · 在读 ${o.reading} · 未读 ${o.unread}',
-        ),
+        c2,
         const SizedBox(width: 14),
-        card(
-          '有原文',
-          '${o.withOriginal}',
-          const Color(0xFF14B8A6),
-          sub: '${o.totalNotes - o.withOriginal} 篇无原文',
-        ),
+        c3,
         const SizedBox(width: 14),
-        card(
-          '孤立笔记',
-          '${o.isolated}',
-          const Color(0xFFF59E0B),
-          sub: '尚未与其他笔记关联',
-        ),
+        c4,
       ],
     );
   }

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../services/book_service.dart';
+import 'responsive.dart';
 
 const _accent = Color(0xFF0D9488);
 const _ink = Color(0xFF2B2B2E);
@@ -160,6 +161,9 @@ class BookPage extends StatefulWidget {
 }
 
 class _BookPageState extends State<BookPage> {
+  // 窄屏单栏切换：0=大纲，1=正文。
+  int _mobileTab = 0;
+
   void _toast(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -592,6 +596,21 @@ class _BookPageState extends State<BookPage> {
 
   Widget _buildWorkspace(BookService svc) {
     final book = svc.current!;
+    if (context.isCompact) {
+      // 窄屏单栏：大纲 / 正文 顶部切换。
+      return Column(
+        children: [
+          _topBar(svc, book),
+          if (svc.busy || svc.stage.isNotEmpty) _statusStrip(svc),
+          _mobileTabBar(),
+          Expanded(
+            child: _mobileTab == 0
+                ? _leftPanel(svc, book, mobile: true)
+                : _rightEditor(svc, book),
+          ),
+        ],
+      );
+    }
     return Column(
       children: [
         _topBar(svc, book),
@@ -608,6 +627,24 @@ class _BookPageState extends State<BookPage> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _mobileTabBar() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: Color(0xFFECECEE))),
+      ),
+      child: SegmentedButton<int>(
+        style: const ButtonStyle(visualDensity: VisualDensity.compact),
+        segments: const [
+          ButtonSegment(value: 0, label: Text('大纲')),
+          ButtonSegment(value: 1, label: Text('正文')),
+        ],
+        selected: {_mobileTab},
+        onSelectionChanged: (v) => setState(() => _mobileTab = v.first),
+      ),
     );
   }
 
@@ -741,9 +778,9 @@ class _BookPageState extends State<BookPage> {
     );
   }
 
-  Widget _leftPanel(BookService svc, Book book) {
+  Widget _leftPanel(BookService svc, Book book, {bool mobile = false}) {
     return SizedBox(
-      width: 270,
+      width: mobile ? double.infinity : 270,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [

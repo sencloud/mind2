@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:pdfrx/pdfrx.dart';
@@ -131,6 +132,19 @@ Future<void> main() async {
 
 void unawaited(Future<void> f) {}
 
+/// 允许触摸、鼠标、触控笔、触控板拖动滚动：安卓触摸滚动更顺，桌面也可鼠标拖拽。
+class _AppScrollBehavior extends MaterialScrollBehavior {
+  const _AppScrollBehavior();
+
+  @override
+  Set<PointerDeviceKind> get dragDevices => {
+        PointerDeviceKind.touch,
+        PointerDeviceKind.mouse,
+        PointerDeviceKind.stylus,
+        PointerDeviceKind.trackpad,
+      };
+}
+
 class MindApp extends StatelessWidget {
   const MindApp({
     super.key,
@@ -178,9 +192,17 @@ class MindApp extends StatelessWidget {
     return MaterialApp(
       title: '第二大脑',
       debugShowCheckedModeBanner: false,
+      scrollBehavior: const _AppScrollBehavior(),
       theme: ThemeData(
         useMaterial3: true,
-        fontFamily: 'Microsoft YaHei UI',
+        // 打包字体统一桌面与安卓观感；系统字体作为缺字兜底。
+        fontFamily: 'Noto Sans SC',
+        fontFamilyFallback: const [
+          'Microsoft YaHei UI',
+          'PingFang SC',
+          'Noto Sans CJK SC',
+          'sans-serif',
+        ],
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF1A1A1A),
           surface: Colors.white,

@@ -230,6 +230,7 @@ class _EditableCodeViewState extends State<EditableCodeView>
                   code: const TextStyle(
                       fontSize: 12.5,
                       fontFamily: 'Consolas',
+                      fontFamilyFallback: ['monospace'],
                       backgroundColor: Color(0xFFEFF1F4)),
                   a: const TextStyle(color: Color(0xFF0D9488)),
                 ),

@@ -14,6 +14,7 @@ import '../services/library_service.dart';
 import '../services/settings_service.dart';
 import '../services/topic_service.dart';
 import 'library_page.dart' show statusColor;
+import 'responsive.dart';
 
 class GraphPage extends StatefulWidget {
   const GraphPage({
@@ -54,6 +55,9 @@ class _GraphPageState extends State<GraphPage>
   bool _didPan = false;
   int? _popup;
   Offset _doubleTapPos = Offset.zero;
+  // 缩放手势的基准（支持触摸捏合缩放 + 单指拖拽平移）。
+  double _baseScale = 1;
+  Offset _lastFocal = Offset.zero;
 
   final _searchController = TextEditingController();
   Timer? _searchDebounce;
@@ -265,27 +269,41 @@ class _GraphPageState extends State<GraphPage>
     });
   }
 
-  void _onPanStart(DragStartDetails d) {
+  // 统一用 scale 手势：单指=拖拽平移/移动节点，双指=捏合缩放。兼容触摸与鼠标。
+  void _onScaleStart(ScaleStartDetails d) {
     _didPan = false;
-    _dragIndex = _hitTest(d.localPosition);
+    _baseScale = _scale;
+    _lastFocal = d.localFocalPoint;
+    _dragIndex =
+        d.pointerCount == 1 ? _hitTest(d.localFocalPoint) : null;
     if (_dragIndex != null) _wake(0.35);
   }
 
-  void _onPanUpdate(DragUpdateDetails d) {
-    _didPan = true;
+  void _onScaleUpdate(ScaleUpdateDetails d) {
+    // 单指拖住某个节点：移动该节点。
+    if (_dragIndex != null && d.pointerCount == 1) {
+      _didPan = true;
+      setState(() {
+        _pos[_dragIndex!] = _toWorld(d.localFocalPoint);
+        _paintVersion++;
+      });
+      _wake(0.3);
+      _lastFocal = d.localFocalPoint;
+      return;
+    }
+    final focal = d.localFocalPoint;
+    final focalDelta = focal - _lastFocal;
+    _lastFocal = focal;
+    if (focalDelta != Offset.zero || d.scale != 1.0) _didPan = true;
     setState(() {
-      if (_dragIndex != null) {
-        _pos[_dragIndex!] = _toWorld(d.localPosition);
-        _paintVersion++;
-        _wake(0.3);
-      } else {
-        _camera += d.delta;
-        _paintVersion++;
-      }
+      final worldUnderFocal = _toWorld(focal); // 用旧 scale/camera 计算
+      _scale = (_baseScale * d.scale).clamp(0.25, 4.0);
+      _camera = focal - _center - worldUnderFocal * _scale + focalDelta;
+      _paintVersion++;
     });
   }
 
-  void _onPanEnd(DragEndDetails d) {
+  void _onScaleEnd(ScaleEndDetails d) {
     if (_dragIndex != null && !_didPan) _selectNode(_dragIndex);
     _dragIndex = null;
     _wake(0.25);
@@ -440,6 +458,30 @@ $catalog
       );
     }
     final matched = _matchedIndices();
+    // 窄屏：详情面板改为底部浮层（占屏高约一半），画布占满。
+    if (context.isCompact) {
+      return Stack(
+        children: [
+          Positioned.fill(child: _buildCanvas(graph, matched)),
+          if (_selected != null)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: Material(
+                elevation: 12,
+                borderRadius:
+                    const BorderRadius.vertical(top: Radius.circular(16)),
+                clipBehavior: Clip.antiAlias,
+                child: SizedBox(
+                  height: MediaQuery.sizeOf(context).height * 0.5,
+                  child: _buildPanel(graph, _selected!),
+                ),
+              ),
+            ),
+        ],
+      );
+    }
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -470,9 +512,9 @@ $catalog
                       : SystemMouseCursors.basic,
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
-                    onPanStart: _onPanStart,
-                    onPanUpdate: _onPanUpdate,
-                    onPanEnd: _onPanEnd,
+                    onScaleStart: _onScaleStart,
+                    onScaleUpdate: _onScaleUpdate,
+                    onScaleEnd: _onScaleEnd,
                     onTapUp: _onTapUp,
                     onDoubleTapDown: (d) => _doubleTapPos = d.localPosition,
                     onDoubleTap: () {
@@ -513,14 +555,17 @@ $catalog
               right: 16,
               bottom: 12,
               child: Text(
-                '${graph.nodes.length} 节点 · ${graph.edges.length} 连接    滚轮缩放 · 拖拽平移/移动节点 · 点击查看',
+                '${graph.nodes.length} 节点 · ${graph.edges.length} 连接    '
+                '${context.isCompact ? '双指缩放' : '滚轮/双指缩放'} · 拖拽平移/移动节点 · 点击查看',
                 style: const TextStyle(
                   fontSize: 11.5,
                   color: Color(0xFFB9B9BD),
                 ),
               ),
             ),
-            Positioned(left: 16, bottom: 12, child: _buildLegend()),
+            // 窄屏隐藏图例，避免与底部提示重叠、横向溢出。
+            if (!context.isCompact)
+              Positioned(left: 16, bottom: 12, child: _buildLegend()),
           ],
         );
       },

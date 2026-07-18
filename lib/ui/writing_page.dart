@@ -12,6 +12,17 @@ import 'mind_map_page.dart';
 import 'paper_page.dart';
 import 'pro_book_page.dart';
 import 'promo_page.dart';
+import 'responsive.dart';
+
+/// 写作分区元信息：值 + 图标 + 名称（供段控与下拉共用）。
+const List<({int value, IconData icon, String label})> _writingTabs = [
+  (value: 0, icon: Icons.description_outlined, label: '文档'),
+  (value: 4, icon: Icons.account_tree_outlined, label: '思维导图'),
+  (value: 1, icon: Icons.menu_book_outlined, label: '专业书籍'),
+  (value: 2, icon: Icons.auto_stories_outlined, label: '小说'),
+  (value: 3, icon: Icons.article_outlined, label: '论文'),
+  (value: 5, icon: Icons.campaign_outlined, label: '推广'),
+];
 
 class WritingPage extends StatefulWidget {
   const WritingPage({
@@ -52,6 +63,7 @@ class _WritingPageState extends State<WritingPage> {
 
   @override
   Widget build(BuildContext context) {
+    final compact = context.isCompact;
     return Column(
       children: [
         Container(
@@ -70,44 +82,11 @@ class _WritingPageState extends State<WritingPage> {
                 style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
               ),
               const SizedBox(width: 18),
-              SegmentedButton<int>(
-                segments: const [
-                  ButtonSegment(
-                    value: 0,
-                    icon: Icon(Icons.description_outlined, size: 16),
-                    label: Text('文档'),
-                  ),
-                  ButtonSegment(
-                    value: 4,
-                    icon: Icon(Icons.account_tree_outlined, size: 16),
-                    label: Text('思维导图'),
-                  ),
-                  ButtonSegment(
-                    value: 1,
-                    icon: Icon(Icons.menu_book_outlined, size: 16),
-                    label: Text('专业书籍'),
-                  ),
-                  ButtonSegment(
-                    value: 2,
-                    icon: Icon(Icons.auto_stories_outlined, size: 16),
-                    label: Text('小说'),
-                  ),
-                  ButtonSegment(
-                    value: 3,
-                    icon: Icon(Icons.article_outlined, size: 16),
-                    label: Text('论文'),
-                  ),
-                  ButtonSegment(
-                    value: 5,
-                    icon: Icon(Icons.campaign_outlined, size: 16),
-                    label: Text('推广'),
-                  ),
-                ],
-                selected: {_tab},
-                onSelectionChanged: (values) {
-                  setState(() => _tab = values.first);
-                },
-              ),
+              // 窄屏用下拉切换分区，避免 6 段控溢出；宽屏保持段控。
+              if (compact)
+                Expanded(child: _buildTabDropdown())
+              else
+                _buildSegmented(),
             ],
           ),
         ),
@@ -125,6 +104,48 @@ class _WritingPageState extends State<WritingPage> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildSegmented() {
+    return SegmentedButton<int>(
+      segments: [
+        for (final t in _writingTabs)
+          ButtonSegment(
+            value: t.value,
+            icon: Icon(t.icon, size: 16),
+            label: Text(t.label),
+          ),
+      ],
+      selected: {_tab},
+      onSelectionChanged: (values) => setState(() => _tab = values.first),
+    );
+  }
+
+  Widget _buildTabDropdown() {
+    return DropdownButtonHideUnderline(
+      child: DropdownButton<int>(
+        value: _tab,
+        isExpanded: true,
+        isDense: true,
+        borderRadius: BorderRadius.circular(10),
+        items: [
+          for (final t in _writingTabs)
+            DropdownMenuItem(
+              value: t.value,
+              child: Row(
+                children: [
+                  Icon(t.icon, size: 16, color: const Color(0xFF6B6B70)),
+                  const SizedBox(width: 8),
+                  Text(t.label, style: const TextStyle(fontSize: 14)),
+                ],
+              ),
+            ),
+        ],
+        onChanged: (v) {
+          if (v != null) setState(() => _tab = v);
+        },
+      ),
     );
   }
 }

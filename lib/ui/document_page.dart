@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
 import '../services/document_service.dart';
+import '../services/platform_capabilities.dart';
+import 'responsive.dart';
 import 'sheet_grid.dart';
 
 const _accent = Color(0xFF0D9488);
@@ -27,6 +29,8 @@ class _DocumentPageState extends State<DocumentPage> {
   String _selectedTemplate = DocumentService.templates.first.id;
   String? _boundId;
   bool _editing = false;
+  // 窄屏单栏切换：0=配置面板，1=正文。
+  int _mobileTab = 0;
 
   @override
   void dispose() {
@@ -207,6 +211,20 @@ class _DocumentPageState extends State<DocumentPage> {
   Widget _buildWorkspace(DocumentService svc) {
     final draft = svc.current!;
     final template = svc.templateOf(_selectedTemplate);
+    if (context.isCompact) {
+      // 窄屏单栏：顶部切换「配置 / 正文」，避免固定 390 侧栏溢出。
+      return Column(
+        children: [
+          _topBar(svc, draft),
+          _mobileTabBar(),
+          Expanded(
+            child: _mobileTab == 0
+                ? _leftPanel(svc, draft, template)
+                : (_editing ? _editor(draft) : _preview(draft)),
+          ),
+        ],
+      );
+    }
     return Column(
       children: [
         _topBar(svc, draft),
@@ -221,6 +239,30 @@ class _DocumentPageState extends State<DocumentPage> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _mobileTabBar() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: Color(0xFFECECEE))),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: SegmentedButton<int>(
+              style: const ButtonStyle(visualDensity: VisualDensity.compact),
+              segments: const [
+                ButtonSegment(value: 0, label: Text('配置')),
+                ButtonSegment(value: 1, label: Text('正文')),
+              ],
+              selected: {_mobileTab},
+              onSelectionChanged: (v) => setState(() => _mobileTab = v.first),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -878,8 +920,10 @@ class _DocumentPageState extends State<DocumentPage> {
     if (draft == null) return;
     // 多工作表 Excel 文档默认只导出 xlsx；普通文稿默认导出 Word + PDF。
     final sheet = draft.spreadsheet;
+    // PDF 导出依赖本机 Edge/Chrome 无头打印，移动端不可用。
+    final canPdf = PlatformCapabilities.supportsPdfExport;
     var exportWord = !sheet;
-    var exportPdf = !sheet;
+    var exportPdf = !sheet && canPdf;
     var exportExcel = sheet;
     var htmlPipeline = true;
     final ok = await showDialog<bool>(
@@ -906,21 +950,25 @@ class _DocumentPageState extends State<DocumentPage> {
                   subtitle: const Text('导出为标准 .docx 文件'),
                   onChanged: (v) => setLocal(() => exportWord = v ?? false),
                 ),
-                CheckboxListTile(
-                  value: exportPdf,
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('导出 PDF'),
-                  subtitle: const Text('使用本机 Edge / Chrome 打印为 PDF'),
-                  onChanged: (v) => setLocal(() => exportPdf = v ?? false),
-                ),
-                const Divider(height: 24),
-                CheckboxListTile(
-                  value: htmlPipeline,
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('高级选项：先由 Markdown 生成 HTML 再导出'),
-                  subtitle: const Text('默认启用，表格、标题和列表排版更稳定，并保留 HTML 文件'),
-                  onChanged: (v) => setLocal(() => htmlPipeline = v ?? true),
-                ),
+                if (canPdf)
+                  CheckboxListTile(
+                    value: exportPdf,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('导出 PDF'),
+                    subtitle: const Text('使用本机 Edge / Chrome 打印为 PDF'),
+                    onChanged: (v) => setLocal(() => exportPdf = v ?? false),
+                  ),
+                if (canPdf) ...[
+                  const Divider(height: 24),
+                  CheckboxListTile(
+                    value: htmlPipeline,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('高级选项：先由 Markdown 生成 HTML 再导出'),
+                    subtitle:
+                        const Text('默认启用，表格、标题和列表排版更稳定，并保留 HTML 文件'),
+                    onChanged: (v) => setLocal(() => htmlPipeline = v ?? true),
+                  ),
+                ],
               ],
             ),
           ),

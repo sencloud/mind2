@@ -8,6 +8,7 @@ import '../services/chat_service.dart';
 import '../services/library_service.dart';
 import '../services/settings_service.dart';
 import 'enter_to_send.dart';
+import 'responsive.dart';
 
 const _attachMarker = '【附件：';
 
@@ -126,19 +127,21 @@ class _ChatPageState extends State<ChatPage> {
           return _buildEmptyState();
         }
         _scrollToBottom();
+        // 窄屏收敛横向留白，避免气泡与输入框被挤窄。
+        final hPad = context.isCompact ? 16.0 : 48.0;
         return Column(
           children: [
             Expanded(
               child: ListView.builder(
                 controller: _scrollController,
-                padding: const EdgeInsets.fromLTRB(48, 16, 48, 24),
+                padding: EdgeInsets.fromLTRB(hPad, 16, hPad, 24),
                 itemCount: session.messages.length,
                 itemBuilder: (context, i) =>
                     _MessageBubble(message: session.messages[i]),
               ),
             ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(48, 0, 48, 24),
+              padding: EdgeInsets.fromLTRB(hPad, 0, hPad, 24),
               child: _buildInput(),
             ),
           ],
@@ -332,7 +335,8 @@ class _MessageBubble extends StatelessWidget {
       return Align(
         alignment: Alignment.centerRight,
         child: Container(
-          margin: const EdgeInsets.only(bottom: 16, left: 80),
+          margin: EdgeInsets.only(
+              bottom: 16, left: context.isCompact ? 32 : 80),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           decoration: BoxDecoration(
             color: const Color(0xFFF1F1F3),
@@ -369,7 +373,7 @@ class _MessageBubble extends StatelessWidget {
       );
     }
     return Container(
-      margin: const EdgeInsets.only(bottom: 24, right: 40),
+      margin: EdgeInsets.only(bottom: 24, right: context.isCompact ? 8 : 40),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
