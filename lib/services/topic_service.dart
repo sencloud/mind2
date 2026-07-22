@@ -106,6 +106,65 @@ class _ResearchInsight {
   final String reason;
 }
 
+/// 检索规划前对用户问题的「深度解读」：还原真实意图、核心研究对象、需回答的关键
+/// 子问题与忠于原问题的检索关键词，用来约束后续规划，避免检索漂移到泛化近似主题。
+class _TopicInterpretation {
+  _TopicInterpretation({
+    required this.intent,
+    required this.entities,
+    required this.subQuestions,
+    required this.keywords,
+    required this.constraints,
+  });
+
+  const _TopicInterpretation.empty()
+    : intent = '',
+      entities = const [],
+      subQuestions = const [],
+      keywords = const [],
+      constraints = '';
+
+  /// 一句话概括用户真正想要什么。
+  final String intent;
+
+  /// 问题中出现的具体研究对象/实体（检索必须原样带上）。
+  final List<String> entities;
+
+  /// 为回答该问题必须搞清楚的关键子问题。
+  final List<String> subQuestions;
+
+  /// 忠于原问题、保留实体名的检索关键词。
+  final List<String> keywords;
+
+  /// 地域/时间/市场/口径等必须遵守的约束。
+  final String constraints;
+
+  bool get isEmpty =>
+      intent.isEmpty &&
+      entities.isEmpty &&
+      subQuestions.isEmpty &&
+      keywords.isEmpty;
+
+  /// 供检索规划 prompt 注入的解读说明块。
+  String toPlanningBlock() {
+    final buf = StringBuffer();
+    if (intent.isNotEmpty) buf.writeln('- 真实意图：$intent');
+    if (entities.isNotEmpty) {
+      buf.writeln('- 核心研究对象（检索词必须原样带上，禁止替换为同类泛称）：${entities.join('、')}');
+    }
+    if (subQuestions.isNotEmpty) {
+      buf.writeln('- 需回答的关键子问题：${subQuestions.join('；')}');
+    }
+    if (keywords.isNotEmpty) {
+      buf.writeln('- 忠于原问题的检索关键词：${keywords.join('、')}');
+    }
+    if (constraints.isNotEmpty) {
+      buf.writeln('- 必须遵守的约束（地域/时间/市场/口径）：$constraints');
+    }
+    return buf.toString().trimRight();
+  }
+}
+
 class _ValuedSource {
   _ValuedSource({
     required this.result,
@@ -407,9 +466,27 @@ class TopicFetchService extends ChangeNotifier {
         }
       }
 
-      _log('① 理解研究问题并拆解调研角度…');
+      _log('① 深度解读研究问题并拆解调研角度…');
       if (clarification.trim().isNotEmpty) {
         _log('  已结合你的补充说明确定研究方向。');
+      }
+      final interpretation = await _interpretTopic(topic, clarification);
+      if (!interpretation.isEmpty) {
+        if (interpretation.intent.isNotEmpty) {
+          _log('  问题解读：${interpretation.intent}');
+        }
+        if (interpretation.entities.isNotEmpty) {
+          _log('  研究对象：${interpretation.entities.join('、')}');
+        }
+        if (interpretation.constraints.isNotEmpty) {
+          _log('  研究约束：${interpretation.constraints}');
+        }
+        if (interpretation.subQuestions.isNotEmpty) {
+          _log('  关键子问题：');
+          for (final q in interpretation.subQuestions) {
+            _log('    - $q');
+          }
+        }
       }
       if (projectPack.isNotEmpty) {
         _log('  已结合挂接工程的现状规划检索方向。');
@@ -418,6 +495,7 @@ class TopicFetchService extends ChangeNotifier {
         topic,
         clarification,
         projectPack: projectPack,
+        interpretation: interpretation,
       );
       final category = plan.category;
       researchTitle = plan.title;
@@ -762,12 +840,73 @@ class TopicFetchService extends ChangeNotifier {
     );
   }
 
+  // ---------- 解读 ----------
+
+  /// 开始检索规划前，先用 LLM 深度「解读」用户问题：逐字还原他真正想知道什么，
+  /// 锁定问题中的具体对象/实体、期望的结论类型与地域口径，并给出忠于原问题的检索
+  /// 关键词。解读结果注入后续规划，避免规划脱离本意、检索到与问题无关的泛化资料。
+  Future<_TopicInterpretation> _interpretTopic(
+    String topic,
+    String clarification,
+  ) async {
+    final clarifyBlock = clarification.trim().isEmpty
+        ? ''
+        : '\n用户已就该主题补充说明（务必据此锁定意图）：\n${clarification.trim()}\n';
+    final prompt =
+        '''
+请深度解读用户的研究问题，还原他真正想知道什么，而不要把它替换成一个更宽泛的近似主题。
+
+用户的研究问题：
+「$topic」
+$clarifyBlock
+请逐字理解这句话，特别注意：
+- 问题里出现的**具体对象/实体**（如具体的公司、股票、产品、人物、地点、时间范围等）必须原样保留，检索时也要带上它们，绝不能丢掉或替换成同类的泛称。
+- 用户真正想得到的**结果/结论类型**（例如“找出买卖时机”“对比优劣”“给出可落地方案”），检索必须服务于这个目标，而不是只找该领域的背景综述。
+- 如果问题隐含了地域/市场/口径（如中国 A 股、国内），检索关键词与站点必须匹配，绝不能错配到无关地区的来源。
+
+严格输出 JSON（不要 Markdown、不要多余文字）：
+{
+  "intent":"一句话概括用户真正想要什么，要具体并包含关键对象",
+  "entities":["问题中出现的具体研究对象/实体，原样列出"],
+  "subQuestions":["为回答该问题必须搞清楚的关键子问题"],
+  "keywords":["忠于原问题的检索关键词，保留实体名，中英文按需给出"],
+  "constraints":"地域/时间/市场/口径等必须遵守的约束，没有就留空字符串"
+}
+''';
+    final content = await _chat(
+      [
+        {
+          'role': 'system',
+          'content':
+              '你是严谨的研究审题专家，只忠实还原用户问题的真实意图与对象，绝不把问题替换成泛化的近似主题。只输出 JSON。',
+        },
+        {'role': 'user', 'content': prompt},
+      ],
+      jsonMode: true,
+      useExperimentModel: settings.playwrightBrowserResearchEnabled,
+    );
+    final parsed = _parseJsonObject(content);
+    if (parsed == null) return const _TopicInterpretation.empty();
+    List<String> list(Object? v) => [
+      for (final e in (v as List? ?? []))
+        if (e != null && e.toString().trim().isNotEmpty) e.toString().trim(),
+    ];
+    return _TopicInterpretation(
+      intent: (parsed['intent'] as String? ?? '').trim(),
+      entities: list(parsed['entities']),
+      subQuestions: list(parsed['subQuestions']),
+      keywords: list(parsed['keywords']),
+      constraints: (parsed['constraints'] as String? ?? '').trim(),
+    );
+  }
+
   // ---------- 规划 ----------
 
   Future<_ResearchPlan> _planResearch(
     String topic,
     String clarification, {
     String projectPack = '',
+    _TopicInterpretation interpretation = const _TopicInterpretation.empty(),
   }) async {
     final sourceDesc = SourceId.values
         .where((s) => s != SourceId.zotero) // Zotero 由系统自动检索，不交给 AI 规划
@@ -790,6 +929,11 @@ class TopicFetchService extends ChangeNotifier {
     final existingDesc = existing.isEmpty
         ? '（暂无）'
         : existing.map((c) => '「$c」').join('、');
+    final interpretBlock = interpretation.isEmpty
+        ? ''
+        : '\n【问题解读】以下是对该研究问题的深度解读，检索方向必须严格服务于它——'
+              '尤其要在检索词中原样保留“核心研究对象”，不得漂移到泛化的近似主题，也不得错配地域/市场：\n'
+              '${interpretation.toPlanningBlock()}\n';
     final clarifyBlock = clarification.trim().isEmpty
         ? ''
         : '\n用户已就该主题做了如下澄清/补充（务必据此确定研究方向与检索词，避免理解偏差，例如同名概念要锁定到用户所指的那一个）：\n${clarification.trim()}\n';
@@ -801,7 +945,7 @@ class TopicFetchService extends ChangeNotifier {
         '''
 你是一名研究规划专家。用户想研究以下问题：
 「$topic」
-$clarifyBlock$projectBlock
+$interpretBlock$clarifyBlock$projectBlock
 可用的检索来源（只能从中选择）：
 $sourceDesc
 
@@ -874,10 +1018,13 @@ $profileDesc
       }
       items.add(_PlanItem(src, query));
     }
-    items.addAll(_profileSeedItems(topic, angles, effectiveProfiles));
+    // 种子检索词优先采用「问题解读」得到的忠于原问题、保留实体名的关键词，
+    // 避免机械抽词把具体研究对象丢掉、退化成泛化查询。
+    final coreQuery = _coreQuery(topic, angles, interpretation);
+    items.addAll(_profileSeedItems(coreQuery, effectiveProfiles));
     if (_looksChinese(topic) && !items.any((e) => e.source == SourceId.cnki)) {
       // 用短关键词而不是整段主题作为知网检索词（整段含网址的长句会让知网/搜索返回噪声）。
-      items.insert(0, _PlanItem(SourceId.cnki, _searchKeywords(topic, angles)));
+      items.insert(0, _PlanItem(SourceId.cnki, coreQuery));
     }
     return _ResearchPlan(
       category: category.isEmpty ? '其他' : category,
@@ -928,11 +1075,9 @@ $profileDesc
   }
 
   List<_PlanItem> _profileSeedItems(
-    String topic,
-    List<String> angles,
+    String query,
     List<ResearchSourceProfile> profiles,
   ) {
-    final query = _searchKeywords(topic, angles);
     final out = <_PlanItem>[];
     for (final profile in profiles) {
       for (final source in profile.preferredSources.take(3)) {
@@ -970,6 +1115,30 @@ $profileDesc
 
   String _compactQuery(String value) =>
       value.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+  /// 构造用于种子检索的核心短查询：优先使用「问题解读」还原出的、忠于原问题且
+  /// 保留实体名的关键词（例如具体股票/公司名），确保 site: 模板与单关键词发散都
+  /// 围绕用户真正关心的对象，而不是被机械抽词漂移成泛化查询。解读缺失时退回
+  /// [_searchKeywords] 的关键词抽取。
+  String _coreQuery(
+    String topic,
+    List<String> angles,
+    _TopicInterpretation interpretation,
+  ) {
+    if (interpretation.keywords.isNotEmpty) {
+      final picked = <String>[];
+      var len = 0;
+      for (final k in interpretation.keywords) {
+        final t = k.replaceAll(RegExp(r'https?://\S+'), ' ').trim();
+        if (t.isEmpty || picked.contains(t)) continue;
+        picked.add(t);
+        len += t.length + 1;
+        if (picked.length >= 6 || len >= 60) break;
+      }
+      if (picked.isNotEmpty) return picked.join(' ');
+    }
+    return _searchKeywords(topic, angles);
+  }
 
   /// 构造用于网页/站点检索的「短关键词查询」。
   /// 先剥离 URL，再只取主题里的少量核心关键词（按词频/长度排序、最多 6 个/约 48 字）。

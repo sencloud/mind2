@@ -71,21 +71,24 @@ dev_dependencies:
   flutter_launcher_icons: ^0.14.1
   flutter_native_splash: ^2.4.1
 
-# 安卓自适应图标：前景=加内边距的大脑图案（透明底），背景=纯黑；旧机型用位图。
+# 应用图标：安卓自适应（黑底大脑前景），iOS 用不透明方图（去 alpha、黑底补齐）。
 flutter_launcher_icons:
   android: true
-  ios: false
+  ios: true
   image_path: "assets/icon/app_icon.png"
   adaptive_icon_background: "#0E0E10"
   adaptive_icon_foreground: "assets/icon/app_icon_foreground.png"
   min_sdk_android: 24
+  # iOS 图标不允许 alpha/圆角：拍平透明并用品牌黑填充。
+  remove_alpha_ios: true
+  background_color_ios: "#0E0E10"
 
-# 品牌启动屏：黑底居中 logo，兼容 Android 12+ splash。
+# 品牌启动屏：黑底居中 logo，兼容 Android 12+ 与 iOS。
 flutter_native_splash:
   color: "#0E0E10"
   image: "assets/icon/app_icon_foreground.png"
   android: true
-  ios: false
+  ios: true
   web: false
   android_12:
     color: "#0E0E10"

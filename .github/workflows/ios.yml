@@ -1,0 +1,118 @@
+name: iOS TestFlight
+
+# 推送形如 v1.0.6 的 tag 时构建并上传 TestFlight；也支持在 Actions 页面手动触发。
+# 需要在仓库 Settings → Secrets and variables → Actions 配置下方 env 引用的所有 Secrets。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-14
+    env:
+      BUNDLE_ID: com.plan9.mind
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      # 1) 导入发布证书 (.p12) 到临时钥匙串
+      - name: Import distribution certificate
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
+          p12-password: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+
+      # 2) 安装描述文件 (.mobileprovision)
+      - name: Install provisioning profile
+        run: |
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}" | base64 --decode \
+            > "$HOME/Library/MobileDevice/Provisioning Profiles/dist.mobileprovision"
+
+      # 3) 编译 Flutter（不签名），把 API Key 通过 --dart-define 注入，
+      #    并写入 ios/Flutter/Generated.xcconfig，供后续 xcodebuild 归档复用。
+      - name: Flutter build iOS (no codesign)
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL }}
+          DEEPSEEK_MODEL: ${{ secrets.DEEPSEEK_MODEL }}
+        run: |
+          flutter build ios --release --no-codesign \
+            --dart-define=DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY" \
+            --dart-define=DEEPSEEK_BASE_URL="$DEEPSEEK_BASE_URL" \
+            --dart-define=DEEPSEEK_MODEL="$DEEPSEEK_MODEL"
+
+      # 4) 生成 ExportOptions.plist（手动签名，Team/Profile 由 Secrets 注入）
+      - name: Create ExportOptions.plist
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store</string>
+            <key>teamID</key><string>${{ secrets.IOS_TEAM_ID }}</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>uploadSymbols</key><true/>
+            <key>destination</key><string>export</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${{ env.BUNDLE_ID }}</key>
+              <string>${{ secrets.IOS_PROVISION_PROFILE_NAME }}</string>
+            </dict>
+          </dict>
+          </plist>
+          PLIST
+
+      # 5) 归档（手动签名，命令行覆盖工程签名设置，避免改动 pbxproj）
+      - name: Archive
+        run: |
+          xcodebuild -workspace ios/Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
+            archive \
+            DEVELOPMENT_TEAM="${{ secrets.IOS_TEAM_ID }}" \
+            CODE_SIGN_STYLE=Manual \
+            PROVISIONING_PROFILE_SPECIFIER="${{ secrets.IOS_PROVISION_PROFILE_NAME }}" \
+            CODE_SIGN_IDENTITY="Apple Distribution"
+
+      # 6) 导出 IPA
+      - name: Export IPA
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/ipa"
+
+      # 7) 上传 TestFlight（App Store Connect API Key .p8）
+      - name: Upload to TestFlight
+        run: |
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          echo "${{ secrets.ASC_API_KEY_P8_BASE64 }}" | base64 --decode \
+            > "$HOME/.appstoreconnect/private_keys/AuthKey_${{ secrets.ASC_KEY_ID }}.p8"
+          IPA=$(ls "$RUNNER_TEMP"/ipa/*.ipa | head -n 1)
+          echo "Uploading $IPA"
+          xcrun altool --upload-app -f "$IPA" -t ios \
+            --apiKey "${{ secrets.ASC_KEY_ID }}" \
+            --apiIssuer "${{ secrets.ASC_ISSUER_ID }}"
+
+      - name: Upload IPA artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: ${{ runner.temp }}/ipa/*.ipa
+          if-no-files-found: warn
