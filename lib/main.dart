@@ -23,9 +23,11 @@ import 'services/pro_book_service.dart';
 import 'services/project_doc_service.dart';
 import 'services/project_service.dart';
 import 'services/promo_service.dart';
+import 'services/self_learning_service.dart';
 import 'services/settings_service.dart';
 import 'services/system_proxy.dart';
 import 'services/topic_service.dart';
+import 'services/tray_service.dart';
 import 'services/video_service.dart';
 import 'services/zotero_service.dart';
 import 'ui/app_shell.dart';
@@ -92,6 +94,8 @@ Future<void> main() async {
   final video = VideoService(settings);
   // 「计划」：每日待办 + AI 分析并执行（复用统一 Agent 内核）。
   final plan = PlanService(settings, memory, research: topic);
+  // 「知识库自学习」：按主题定时研究 + 媒体采集 + 整理，后台常驻持续学习。
+  final selfLearning = SelfLearningService(settings, library, fileLibrary, topic);
   await chat.init();
   await topic.init();
   if (PlatformCapabilities.supportsExperiment) {
@@ -112,8 +116,13 @@ Future<void> main() async {
   await drawing.init();
   await video.init();
   await plan.init();
+  await selfLearning.init();
   unawaited(library.reload());
   unawaited(fileLibrary.reload());
+  // 桌面端：装配系统托盘（关闭最小化到托盘 + 右键菜单 + 开机自启）。
+  if (PlatformCapabilities.supportsDesktopWindow) {
+    unawaited(TrayService(selfLearning).init());
+  }
   runApp(
     MindApp(
       settings: settings,
@@ -136,6 +145,7 @@ Future<void> main() async {
       drawing: drawing,
       video: video,
       plan: plan,
+      selfLearning: selfLearning,
     ),
   );
 }
@@ -178,6 +188,7 @@ class MindApp extends StatelessWidget {
     required this.drawing,
     required this.video,
     required this.plan,
+    required this.selfLearning,
   });
 
   final SettingsService settings;
@@ -200,6 +211,7 @@ class MindApp extends StatelessWidget {
   final DrawingService drawing;
   final VideoService video;
   final PlanService plan;
+  final SelfLearningService selfLearning;
 
   @override
   Widget build(BuildContext context) {
@@ -260,6 +272,7 @@ class MindApp extends StatelessWidget {
               drawing: drawing,
               video: video,
               plan: plan,
+              selfLearning: selfLearning,
             ),
     );
   }

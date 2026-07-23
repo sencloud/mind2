@@ -18,6 +18,7 @@ import '../services/pro_book_service.dart';
 import '../services/project_doc_service.dart';
 import '../services/project_service.dart';
 import '../services/promo_service.dart';
+import '../services/self_learning_service.dart';
 import '../services/settings_service.dart';
 import '../services/topic_service.dart';
 import '../services/video_service.dart';
@@ -56,6 +57,7 @@ class AppShell extends StatefulWidget {
     required this.drawing,
     required this.video,
     required this.plan,
+    required this.selfLearning,
   });
 
   final SettingsService settings;
@@ -78,6 +80,7 @@ class AppShell extends StatefulWidget {
   final DrawingService drawing;
   final VideoService video;
   final PlanService plan;
+  final SelfLearningService selfLearning;
 
   @override
   State<AppShell> createState() => _AppShellState();
@@ -131,6 +134,7 @@ class _AppShellState extends State<AppShell> {
         library: widget.library,
         fileLibrary: widget.fileLibrary,
         experiment: widget.experiment,
+        selfLearning: widget.selfLearning,
         initialNote: _noteToOpen,
         onContinueResearch: (topic, clarification) {
           setState(() => _index = 3);

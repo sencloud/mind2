@@ -16,8 +16,10 @@ import '../services/graph_service.dart';
 import '../services/library_service.dart';
 import '../services/paper_service.dart';
 import '../services/platform_capabilities.dart';
+import '../services/self_learning_service.dart';
 import '../util/text_util.dart';
 import 'preview/file_preview.dart';
+import 'self_learning_page.dart';
 
 const statusOptions = ['未读', '在读', '已读'];
 
@@ -73,6 +75,7 @@ class LibraryPage extends StatefulWidget {
     required this.library,
     required this.fileLibrary,
     required this.experiment,
+    this.selfLearning,
     this.initialNote,
     this.onContinueResearch,
     this.onConvertResearchToPaper,
@@ -82,6 +85,7 @@ class LibraryPage extends StatefulWidget {
   final LibraryService library;
   final FileLibraryService fileLibrary;
   final ExperimentService experiment;
+  final SelfLearningService? selfLearning;
   final StandardNote? initialNote;
   final void Function(String topic, String clarification)? onContinueResearch;
   final void Function(StandardNote note, PaperFormat format)?
@@ -828,6 +832,15 @@ ${_clipContext(note.body, 12000)}
     }
   }
 
+  /// 打开「知识库自学习」配置与状态页。
+  void _openSelfLearning() {
+    final sl = widget.selfLearning;
+    if (sl == null) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => SelfLearningPage(service: sl)),
+    );
+  }
+
   /// 重新扫描：为文件库中未建笔记的文档补建分类笔记，合并相同主题、
   /// 去重资料，再为空白笔记自动生成内容。全程模态进度框。
   Future<void> _rescan() => _runWithProgress('重新扫描', () async {
@@ -1350,6 +1363,46 @@ ${_clipContext(note.body, 12000)}
             ],
           ),
         ),
+        if (widget.selfLearning != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            child: AnimatedBuilder(
+              animation: widget.selfLearning!,
+              builder: (context, _) {
+                final sl = widget.selfLearning!;
+                final on = sl.config.enabled;
+                return SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _openSelfLearning,
+                    icon: Icon(
+                      sl.running
+                          ? Icons.autorenew
+                          : (on
+                              ? Icons.auto_awesome
+                              : Icons.auto_awesome_outlined),
+                      size: 15,
+                      color: on ? const Color(0xFF6D28D9) : null,
+                    ),
+                    label: Text(
+                      sl.running
+                          ? '自学习中…'
+                          : (on ? '知识库自学习 · 已开启' : '知识库自学习'),
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        color: on ? const Color(0xFF6D28D9) : null,
+                      ),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      side: on
+                          ? const BorderSide(color: Color(0xFF6D28D9))
+                          : null,
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
         Padding(
           padding: const EdgeInsets.only(bottom: 8),
           child: Text(

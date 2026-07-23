@@ -56,6 +56,8 @@ dependencies:
   package_info_plus: ^9.0.1
   re_editor: ^0.9.0
   re_highlight: ^0.0.3
+  tray_manager: ^0.5.3
+  launch_at_startup: ^0.5.1
 
 dev_dependencies:
   flutter_test:
@@ -107,11 +109,16 @@ flutter:
 
   assets:
     - assets/icon/app_icon.png
+    # 系统托盘图标（Windows 用 .ico）。
+    - assets/icon/tray_icon.ico
     # 捆绑 ripgrep(rg) 二进制：运行时释放到应用支持目录后执行（grep/glob/文件枚举）。
     - assets/bin/windows/rg.exe
     - assets/bin/linux/rg
     - assets/bin/macos/rg
     - assets/bin/macos/rg-x64
+    # 捆绑 yt-dlp + ffmpeg：知识库自学习的媒体素材采集（下载 + 字幕抽取转文字）。
+    - assets/bin/windows/yt-dlp.exe
+    - assets/bin/windows/ffmpeg.exe
 
   fonts:
     # 打包 Noto Sans SC 可变字体：桌面与安卓统一中文观感（含全字重 wght 轴）。
