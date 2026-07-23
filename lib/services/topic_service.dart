@@ -275,6 +275,11 @@ class TopicFetchService extends ChangeNotifier {
   /// 最近一次研究产出的报告笔记路径（供调用方关联，如项目会话）。
   String? get lastReportPath => _pendingReportPath;
 
+  /// 最近一次研究命中的所有线索 URL（优先落地页），供「知识库自学习」从中
+  /// 补抽媒体链接交给 yt-dlp。因自学习用 recordInHistory:false，走内存 getter。
+  List<String> _lastFindingUrls = const [];
+  List<String> get lastFindingUrls => List.unmodifiable(_lastFindingUrls);
+
   /// 研究完成后回调，参数为研究报告笔记的文件路径（用于自动跳转查看）。
   void Function(String reportNotePath)? onResearchComplete;
 
@@ -447,6 +452,7 @@ class TopicFetchService extends ChangeNotifier {
     _browserReadsByUrl.clear();
     _browserNotesByUrl.clear();
     _directReadUrls.clear();
+    _lastFindingUrls = const [];
     _visionUnsupported = false;
     var researchTitle = topic;
     logs.clear();
@@ -591,6 +597,10 @@ class TopicFetchService extends ChangeNotifier {
         _log('未检索到任何结果，请换个表述或更具体的关键词。');
         return;
       }
+      _lastFindingUrls = findings
+          .map((r) => r.landingUrl ?? r.url)
+          .where((u) => u.trim().isNotEmpty)
+          .toList();
       _log('  共收集到 ${findings.length} 条线索。');
 
       _log('③ 价值排序：筛选高价值资料与待研读对象…');

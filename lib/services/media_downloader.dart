@@ -6,6 +6,8 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'system_proxy.dart';
+
 /// 一条媒体检索结果：视频/音频的元信息 + 已抽取的字幕正文。
 class MediaHit {
   MediaHit({
@@ -29,9 +31,13 @@ class MediaHit {
 
 /// yt-dlp + ffmpeg 的统一封装（整合 OmniGet / yt-dlp 的核心采集能力）。
 ///
-/// 全工程唯一的媒体采集入口：二进制探测/释放、`ytsearch` 检索、字幕抽取转文字、
-/// 媒体文件下载都收敛到这里。新增「按主题找视频 / 下载音视频 / 抓字幕」的功能
-/// 一律复用本类，不要再各处自拼 yt-dlp 的 `Process.run` 参数。
+/// 全工程唯一的媒体采集入口：二进制探测/释放、多站点检索、按 URL 提取（覆盖
+/// yt-dlp 支持的 1800+ 站）、字幕抽取转文字、媒体文件下载都收敛到这里。新增
+/// 「按主题找视频 / 下载音视频 / 抓字幕」的功能一律复用本类，不要再各处自拼
+/// yt-dlp 的 `Process.run` 参数。
+///
+/// yt-dlp 子进程不会继承 Dart 侧的 [HttpOverrides] 代理，因此这里在 [_prepare]
+/// 时探测系统代理，并通过 [_commonArgs] 给每次调用带上 `--proxy`。
 ///
 /// 字幕优先策略：只抓取平台已有的人工/自动字幕并转成文字，不做本地语音转录(STT)。
 /// 无字幕的音视频由调用方决定是否仅存文件 + 元数据笔记。
@@ -42,12 +48,19 @@ class MediaDownloader {
   /// 优先抓取的字幕语言（中文各变体优先，其次英文）。
   static const _subLangs = 'zh-Hans,zh-CN,zh,zh-Hant,zh-TW,en,en-US';
 
+  /// 多站点关键词搜索默认引擎前缀：YouTube / Bilibili / SoundCloud。
+  static const defaultSearchEngines = ['ytsearch', 'bilisearch', 'scsearch'];
+
   String? _ytDlp;
   String? _ffmpegDir;
+  String? _proxy;
   Future<bool>? _preparing;
 
   /// 仅 Windows 打包了二进制。
   bool get available => Platform.isWindows;
+
+  /// 探测到的系统代理（形如 `127.0.0.1:7897`），未启用为 null。
+  String? get proxy => _proxy;
 
   /// 释放并校验二进制（幂等）。成功后 [_ytDlp]/[_ffmpegDir] 就绪。
   Future<bool> ready() {
@@ -69,7 +82,148 @@ class MediaDownloader {
     if (yt == null || ff == null) return false;
     _ytDlp = yt;
     _ffmpegDir = p.dirname(ff);
+    _proxy = await SystemProxy.detect();
     return true;
+  }
+
+  /// 所有 yt-dlp 调用共用的参数：代理（若探测到）+ 静默/容错。
+  /// 需要 ffmpeg 的调用（字幕转 srt、合流下载）再各自附加 `--ffmpeg-location`。
+  List<String> _commonArgs() => [
+        ..._proxyArgs(),
+        '--ignore-errors',
+        '--no-warnings',
+        '--no-progress',
+      ];
+
+  /// yt-dlp 的 `--proxy` 参数需带协议前缀；系统代理只给出 `host:port`，这里补齐。
+  List<String> _proxyArgs() {
+    final proxy = _proxy;
+    if (proxy == null || proxy.trim().isEmpty) return const [];
+    var url = proxy.trim();
+    if (!url.contains('://')) url = 'http://$url';
+    return ['--proxy', url];
+  }
+
+  /// 多站点关键词并行搜索，返回命中的网页 URL 列表（已按引擎聚合，未去重）。
+  ///
+  /// 对每个引擎前缀跑一次 `PREFIXn:query` 的扁平检索，只打印落地 URL，
+  /// 不下载、不抓元数据，尽量快地拿到一批候选交给后续按 URL 提取。
+  Future<List<String>> searchUrls(
+    String query, {
+    List<String> engines = defaultSearchEngines,
+    int perEngineLimit = 3,
+    Duration timeout = const Duration(minutes: 3),
+  }) async {
+    if (!await ready()) return const [];
+    final lists = await Future.wait(
+      engines.map((e) => _searchOne(e, query, perEngineLimit, timeout)),
+    );
+    return [for (final l in lists) ...l];
+  }
+
+  Future<List<String>> _searchOne(
+    String engine,
+    String query,
+    int limit,
+    Duration timeout,
+  ) async {
+    try {
+      final r = await Process.run(
+        _ytDlp!,
+        [
+          '$engine$limit:$query',
+          '--flat-playlist',
+          '--skip-download',
+          '--print', '%(url)s',
+          ..._commonArgs(),
+        ],
+        stdoutEncoding: utf8,
+        stderrEncoding: utf8,
+      ).timeout(timeout);
+      final urls = <String>[];
+      for (final line in const LineSplitter().convert(r.stdout as String)) {
+        final t = line.trim();
+        if (t.startsWith('http')) urls.add(t);
+      }
+      return urls;
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// 探测任意 URL 是否可被 yt-dlp 提取（真正吃到 1800+ 站的关键）。
+  /// 用 `--simulate` 只取首个条目的 id，exit 0 且拿到 id 即认为可提取。
+  Future<bool> probeExtractable(
+    String url, {
+    Duration timeout = const Duration(seconds: 45),
+  }) async {
+    if (!await ready()) return false;
+    try {
+      final r = await Process.run(
+        _ytDlp!,
+        [
+          url,
+          '--simulate',
+          '--no-playlist',
+          '--playlist-items', '1',
+          '--print', '%(id)s',
+          ..._commonArgs(),
+        ],
+        stdoutEncoding: utf8,
+        stderrEncoding: utf8,
+      ).timeout(timeout);
+      return r.exitCode == 0 && (r.stdout as String).trim().isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 常见媒体站主机白名单（命中即认为大概率可交给 yt-dlp 提取）。
+  static const _mediaHosts = [
+    'youtube.com', 'youtu.be', 'bilibili.com', 'b23.tv', 'vimeo.com',
+    'dailymotion.com', 'tiktok.com', 'douyin.com', 'xiaohongshu.com',
+    'xhslink.com', 'youku.com', 'iqiyi.com', 'v.qq.com', 'ted.com',
+    'coursera.org', 'udemy.com', 'ximalaya.com', 'soundcloud.com',
+    'twitter.com', 'x.com', 'twitch.tv', 'nicovideo.jp', 'facebook.com',
+    'fb.watch', 'instagram.com', 'ixigua.com', 'music.163.com',
+    'open.spotify.com',
+  ];
+
+  /// 明确不是媒体（学术库/代码库/百科/文档站）的主机，直接排除避免无谓探测。
+  static const _nonMediaHosts = [
+    'arxiv.org', 'openalex.org', 'europepmc.org', 'ncbi.nlm.nih.gov',
+    'doi.org', 'github.com', 'gutenberg.org', 'wikipedia.org',
+    'wikimedia.org', 'cnki.net', 'semanticscholar.org', 'researchgate.net',
+  ];
+
+  static const _docExts = [
+    '.pdf', '.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx',
+    '.zip', '.rar', '.epub',
+  ];
+
+  /// 大概率是媒体页（主机命中媒体白名单）。
+  static bool isLikelyMedia(String url) {
+    final u = url.toLowerCase();
+    return _mediaHosts.any((h) => u.contains(h));
+  }
+
+  /// 明确不是媒体（学术/代码/百科主机，或指向文档/压缩包）。
+  static bool isNonMedia(String url) {
+    final u = url.toLowerCase();
+    if (_nonMediaHosts.any((h) => u.contains(h))) return true;
+    final path = Uri.tryParse(u)?.path ?? u;
+    return _docExts.any(path.endsWith);
+  }
+
+  /// 从一段文本（Markdown 正文/研究笔记）里抽取媒体链接（去重后返回）。
+  static List<String> extractMediaUrls(String text) {
+    final re = RegExp(r'''https?://[^\s\)\]"'<>，,）】]+''');
+    final out = <String>{};
+    for (final m in re.allMatches(text)) {
+      final u = m.group(0)!;
+      if (isLikelyMedia(u) && !isNonMedia(u)) out.add(u);
+    }
+    return out.toList();
   }
 
   /// 从 assets 释放单个二进制到 [binDir]（缺失或大小不一致才重写），返回落盘路径。
@@ -88,52 +242,6 @@ class MediaDownloader {
       return out.path;
     } catch (_) {
       return null;
-    }
-  }
-
-  /// 按主题在 YouTube 检索 [limit] 条视频，抓取其字幕并转成文字。
-  ///
-  /// 一次 `ytsearch` 调用即完成检索 + 字幕下载 + 元数据打印；随后本地解析字幕文件。
-  Future<List<MediaHit>> searchSubtitles(
-    String topic, {
-    int limit = 3,
-    Duration timeout = const Duration(minutes: 8),
-  }) async {
-    if (!await ready()) return const [];
-    final tmp = await Directory.systemTemp.createTemp('mind_media_sub_');
-    try {
-      final metaFile = File(p.join(tmp.path, '_index.tsv'));
-      final result = await Process.run(
-        _ytDlp!,
-        [
-          'ytsearch$limit:$topic',
-          '--skip-download',
-          '--write-subs',
-          '--write-auto-subs',
-          '--sub-langs', _subLangs,
-          '--convert-subs', 'srt',
-          '--ffmpeg-location', _ffmpegDir!,
-          '--ignore-errors',
-          '--no-warnings',
-          '--no-progress',
-          '-o', p.join(tmp.path, '%(id)s.%(ext)s'),
-          '--print-to-file',
-          '%(id)s\t%(title)s\t%(webpage_url)s\t%(duration)s',
-          metaFile.path,
-        ],
-        stdoutEncoding: utf8,
-        stderrEncoding: utf8,
-      ).timeout(timeout);
-      // yt-dlp 对搜索到的每一条都会追加一行元数据；部分条目可能因区域/版权失败而缺字幕。
-      if (!await metaFile.exists()) {
-        if (result.exitCode != 0) return const [];
-        return const [];
-      }
-      return _collectHits(tmp, await metaFile.readAsString());
-    } on TimeoutException {
-      return const [];
-    } finally {
-      _cleanup(tmp);
     }
   }
 
@@ -157,9 +265,7 @@ class MediaDownloader {
           '--sub-langs', _subLangs,
           '--convert-subs', 'srt',
           '--ffmpeg-location', _ffmpegDir!,
-          '--ignore-errors',
-          '--no-warnings',
-          '--no-progress',
+          ..._commonArgs(),
           '-o', p.join(tmp.path, '%(id)s.%(ext)s'),
           '--print-to-file',
           '%(id)s\t%(title)s\t%(webpage_url)s\t%(duration)s',
@@ -197,9 +303,7 @@ class MediaDownloader {
           url,
           '--no-playlist',
           '--ffmpeg-location', _ffmpegDir!,
-          '--ignore-errors',
-          '--no-warnings',
-          '--no-progress',
+          ..._commonArgs(),
           '--restrict-filenames',
           if (audioOnly) ...[
             '-x',

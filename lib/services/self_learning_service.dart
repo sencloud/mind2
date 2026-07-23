@@ -15,6 +15,7 @@ import 'library_service.dart';
 import 'media_downloader.dart';
 import 'settings_service.dart';
 import 'topic_service.dart';
+import 'web_reader.dart';
 
 /// 「知识库自学习」的配置。持久化为应用数据目录下的 `self_learning.json`。
 class SelfLearningConfig {
@@ -97,6 +98,9 @@ class SelfLearningService extends ChangeNotifier {
   final LibraryService library;
   final FileLibraryService fileLibrary;
   final TopicFetchService topic;
+
+  /// 读取研究命中网页正文以补抽嵌入媒体链接（Jina Reader，与研究/Agent 同源）。
+  final WebReader _webReader = WebReader();
 
   SelfLearningConfig config = SelfLearningConfig();
 
@@ -299,8 +303,23 @@ class SelfLearningService extends ChangeNotifier {
         .toList();
   }
 
-  /// 学习单个主题：先做文本深度研究，再采集媒体字幕。
+  /// 学习单个主题（URL 驱动的媒体采集）：
+  ///  - Phase A：先跑多站点关键词搜索命中一批候选（让 yt-dlp 活动尽早可见）；
+  ///  - 再做文本深度研究（researchForAgent）；
+  ///  - Phase B：从研究命中的网页里补抽媒体 URL；
+  ///  - 去重/探测后统一按 URL 提取字幕转文字入库（字幕优先，不做语音转录）。
   Future<void> _learnTopic(String t) async {
+    final mediaAvailable =
+        config.mediaEnabled && MediaDownloader.instance.available;
+    final candidates = <String>[];
+
+    // Phase A：多站点搜索先行，日志立刻能看到 yt-dlp 在检索。
+    if (mediaAvailable) {
+      candidates.addAll(await _searchMediaUrls(t));
+    } else if (config.mediaEnabled) {
+      _log('  当前平台不支持媒体采集，跳过媒体部分。');
+    }
+
     _log('▶ 研究主题：$t');
     try {
       await topic.researchForAgent(
@@ -316,42 +335,127 @@ class SelfLearningService extends ChangeNotifier {
       _log('  文本研究失败：$e');
     }
 
-    if (config.mediaEnabled) {
-      await _collectMedia(t);
+    if (mediaAvailable) {
+      // Phase B：从研究命中的网页补抽媒体 URL。
+      candidates.addAll(await _extractMediaFromResearch());
+      await _ingestMedia(t, candidates);
     }
   }
 
-  /// 采集主题相关视频的字幕并转文字入库（字幕优先，不做语音转录）。
-  Future<void> _collectMedia(String t) async {
-    if (!MediaDownloader.instance.available) {
-      _log('  当前平台不支持媒体采集，跳过。');
-      return;
-    }
-    _log('  采集媒体字幕…');
-    final hits = await MediaDownloader.instance.searchSubtitles(
+  /// Phase A：多站点关键词搜索（ytsearch/bilisearch/scsearch），返回候选 URL。
+  Future<List<String>> _searchMediaUrls(String t) async {
+    await MediaDownloader.instance.ready();
+    final proxy = MediaDownloader.instance.proxy;
+    _log('  yt-dlp 多站点检索（ytsearch/bilisearch/scsearch）'
+        '${proxy == null ? '（未检测到系统代理，直连）' : '（走系统代理 $proxy）'}…');
+    final urls = await MediaDownloader.instance.searchUrls(
       t,
-      limit: config.maxMediaPerTopic,
+      perEngineLimit: config.maxMediaPerTopic,
     );
-    if (hits.isEmpty) {
-      _log('  未找到可用媒体字幕。');
+    _log('  多站点检索命中 ${urls.length} 条候选。');
+    return urls;
+  }
+
+  /// Phase B：从本次研究命中的网页 URL 里补抽媒体链接。
+  /// 直接命中媒体站的 URL 入池；少量非文档网页读正文正则补抽嵌入媒体链接。
+  Future<List<String>> _extractMediaFromResearch() async {
+    final findings = topic.lastFindingUrls;
+    if (findings.isEmpty) return const [];
+    final direct = findings
+        .where((u) =>
+            MediaDownloader.isLikelyMedia(u) && !MediaDownloader.isNonMedia(u))
+        .toList();
+    final pages = findings
+        .where((u) =>
+            !MediaDownloader.isLikelyMedia(u) && !MediaDownloader.isNonMedia(u))
+        .take(8)
+        .toList();
+    final pool = <String>[...direct];
+    var extracted = 0;
+    for (final url in pages) {
+      final md = await _webReader.readMarkdown(url);
+      if (md == null) continue;
+      final found = MediaDownloader.extractMediaUrls(md);
+      if (found.isNotEmpty) {
+        pool.addAll(found);
+        extracted += found.length;
+      }
+    }
+    _log('  从研究页面补抽媒体 URL：直接命中 ${direct.length} 条，网页正文补抽 $extracted 条。');
+    return pool;
+  }
+
+  /// 规范化去重后，按 URL 逐个提取字幕转文字入库（跨源处理上限 maxMediaPerTopic）。
+  Future<void> _ingestMedia(String t, List<String> rawUrls) async {
+    final seen = <String>{};
+    final urls = <String>[];
+    for (final u in rawUrls) {
+      final key = _normalizeUrl(u);
+      if (key.isEmpty) continue;
+      if (seen.add(key)) urls.add(u);
+    }
+    if (urls.isEmpty) {
+      final proxy = MediaDownloader.instance.proxy;
+      _log('  未获得任何可提取媒体源'
+          '${proxy == null ? '（未检测到系统代理；若目标站需代理请先在系统开启代理）' : '（代理 $proxy 下多站点检索与研究页面均无媒体命中）'}。');
       return;
     }
+    _log('  去重后候选媒体 ${urls.length} 条，开始按 URL 提取字幕…');
+
     final destDir = Directory(
       p.join(fileLibrary.rootDir, config.saveMediaFiles ? '视频' : '文档'),
     );
-    for (final hit in hits) {
+    final limit = config.maxMediaPerTopic.clamp(1, 50);
+    var processed = 0, ingested = 0, noSub = 0, failed = 0;
+    for (final url in urls) {
+      if (processed >= limit) break;
+      processed++;
+      // 来源不确定（非媒体白名单）的先探测可提取性，真正吃到 yt-dlp 的 1800+ 站。
+      if (!MediaDownloader.isLikelyMedia(url)) {
+        final ok = await MediaDownloader.instance.probeExtractable(url);
+        if (!ok) {
+          failed++;
+          _log('  ⤫ 不可提取：${clip(url, 60, suffix: '…')}');
+          continue;
+        }
+      }
+      final hit = await MediaDownloader.instance.fetchSubtitleText(url);
+      if (hit == null) {
+        failed++;
+        _log('  ⤫ 提取失败：${clip(url, 60, suffix: '…')}');
+        continue;
+      }
       if (hit.hasSubtitle) {
         await _writeMediaNote(t, hit);
+        ingested++;
         _log('  ✓ 字幕入库：${clip(hit.title, 40, suffix: '…')}');
       } else {
-        _log('  ⤫ 无字幕（不转录）：${clip(hit.title, 40, suffix: '…')}');
+        noSub++;
+        _log('  ⤫ 无字幕跳过（不转录）：${clip(hit.title, 40, suffix: '…')}');
       }
       if (config.saveMediaFiles) {
         final file = await MediaDownloader.instance.download(hit.url, destDir);
         if (file != null) _log('  ⬇ 媒体入库：${p.basename(file)}');
       }
     }
-    await fileLibrary.reload();
+    _log('  媒体采集小结：字幕入库 $ingested，无字幕 $noSub，失败/不可提取 $failed。');
+    if (ingested > 0 || config.saveMediaFiles) await fileLibrary.reload();
+  }
+
+  /// URL 规范化去重键：YouTube 取 v/短链 id，其余按主机+路径归一。
+  static String _normalizeUrl(String url) {
+    final u = url.trim();
+    if (u.isEmpty) return '';
+    final uri = Uri.tryParse(u);
+    if (uri == null || uri.host.isEmpty) return u.toLowerCase();
+    final host = uri.host.toLowerCase().replaceFirst('www.', '');
+    if (host.contains('youtube.com') && uri.queryParameters['v'] != null) {
+      return 'youtube:${uri.queryParameters['v']}';
+    }
+    if (host == 'youtu.be' && uri.pathSegments.isNotEmpty) {
+      return 'youtube:${uri.pathSegments.first}';
+    }
+    return '$host${uri.path}'.toLowerCase();
   }
 
   Future<void> _writeMediaNote(String topicName, MediaHit hit) async {
