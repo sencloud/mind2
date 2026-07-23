@@ -19,8 +19,8 @@ class HeadlessBrowser {
     r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
   ];
 
-  /// 高清截图默认设备像素倍率：4x，保证放大查看 / 打印依然清晰锐利。
-  static const pngScale = 4;
+  /// 高清截图默认设备像素倍率：3x，兼顾清晰度与解码/内存开销的稳定性。
+  static const pngScale = 3;
 
   /// 高清截图默认视口逻辑尺寸：足够宽以容纳宽幅架构图，避免被裁剪。
   /// 实际输出像素 = 视口尺寸 × [pngScale]，多余白边由调用方按需裁掉。
@@ -57,7 +57,7 @@ class HeadlessBrowser {
       final htmlFile = File(p.join(tmp.path, 'page.html'));
       await htmlFile.writeAsString(html, encoding: utf8);
       final png = File(p.join(tmp.path, 'out.png'));
-      final result = await Process.run(
+      await Process.run(
         browser,
         [
           '--headless=new',
@@ -76,7 +76,9 @@ class HeadlessBrowser {
         stdoutEncoding: utf8,
         stderrEncoding: utf8,
       ).timeout(timeout);
-      if (result.exitCode != 0 || !await png.exists()) return null;
+      // `--headless=new` 会在启动进程返回后才异步写完截图文件，
+      // 故不能立即判断 exists，需轮询等待文件出现且大小稳定。
+      if (!await _awaitOutputFile(png)) return null;
       return await png.readAsBytes();
     } catch (_) {
       return null;
@@ -114,7 +116,8 @@ class HeadlessBrowser {
         stdoutEncoding: utf8,
         stderrEncoding: utf8,
       ).timeout(timeout);
-      if (result.exitCode != 0 || !await out.exists()) {
+      // 同截图：`--headless=new` 异步落盘，需轮询等待 PDF 文件写完。
+      if (!await _awaitOutputFile(out)) {
         throw Exception(
           'PDF 导出失败：${(result.stderr as String?)?.trim() ?? result.exitCode}',
         );
@@ -124,6 +127,31 @@ class HeadlessBrowser {
         await tmp.delete(recursive: true);
       } catch (_) {}
     }
+  }
+
+  /// 轮询等待无头浏览器异步写出的输出文件（截图/PDF）：直到文件存在、
+  /// 非空且大小连续两次采样保持稳定（写完），或超时。
+  static Future<bool> _awaitOutputFile(
+    File f, {
+    Duration timeout = const Duration(seconds: 25),
+    Duration interval = const Duration(milliseconds: 150),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    var lastSize = -1;
+    var stable = 0;
+    while (DateTime.now().isBefore(deadline)) {
+      if (await f.exists()) {
+        final size = await f.length();
+        if (size > 0 && size == lastSize) {
+          if (++stable >= 2) return true;
+        } else {
+          stable = 0;
+        }
+        lastSize = size;
+      }
+      await Future.delayed(interval);
+    }
+    return await f.exists() && await f.length() > 0;
   }
 
   /// 渲染页面并返回最终 DOM HTML（找不到浏览器或失败返回 null）。

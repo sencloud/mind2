@@ -99,8 +99,8 @@ class _DrawingPageState extends State<DrawingPage> {
           ),
           const SizedBox(height: 6),
           const Text(
-            '选择图种并（可选）关联一个或多个工程，第二大脑会读取真实代码结构，'
-            '生成漂亮、完整的架构图（Mermaid，可编辑并渲染为高清图片）。',
+            '选择骨架模版并（可选）关联一个或多个工程，第二大脑会读取真实代码结构，'
+            '按所选骨架风格生成漂亮、完整的架构图（Mermaid，可编辑并渲染为高清图片）。',
             style: TextStyle(fontSize: 13, color: _sub),
           ),
           const SizedBox(height: 24),
@@ -181,7 +181,7 @@ class _DrawingPageState extends State<DrawingPage> {
               const SizedBox(height: 6),
               Row(
                 children: [
-                  _chip(doc.kind.label),
+                  _chip(doc.skeleton.label),
                   const SizedBox(width: 6),
                   if (doc.linkedProjects.isNotEmpty)
                     Flexible(
@@ -343,22 +343,28 @@ class _DrawingPageState extends State<DrawingPage> {
           },
         ),
         const SizedBox(height: 12),
-        DropdownButtonFormField<DiagramKind>(
-          initialValue: doc.kind,
+        DropdownButtonFormField<DiagramSkeleton>(
+          initialValue: doc.skeleton,
+          isExpanded: true,
           decoration: const InputDecoration(
-            labelText: '图种',
+            labelText: '骨架模版',
             border: OutlineInputBorder(),
             isDense: true,
           ),
           items: [
-            for (final k in DiagramKind.values)
-              DropdownMenuItem(value: k, child: Text(k.label)),
+            for (final s in DiagramSkeleton.values)
+              DropdownMenuItem(value: s, child: Text(s.label)),
           ],
           onChanged: svc.busy
               ? null
               : (v) {
-                  if (v != null) svc.setKind(v);
+                  if (v != null) svc.setSkeleton(v);
                 },
+        ),
+        const SizedBox(height: 6),
+        Text(
+          doc.skeleton.desc,
+          style: const TextStyle(fontSize: 11.5, color: _muted, height: 1.4),
         ),
         const SizedBox(height: 12),
         TextField(
@@ -606,7 +612,7 @@ class _DrawingPageState extends State<DrawingPage> {
   Future<void> _newDrawing(DrawingService svc) async {
     final title = TextEditingController();
     final prompt = TextEditingController();
-    var kind = DiagramKind.system;
+    var skeleton = DiagramSkeleton.layeredBands;
     final picked = <String>[];
     final created = await showDialog<bool>(
       context: context,
@@ -625,16 +631,23 @@ class _DrawingPageState extends State<DrawingPage> {
                     decoration: const InputDecoration(labelText: '标题'),
                   ),
                   const SizedBox(height: 10),
-                  DropdownButtonFormField<DiagramKind>(
-                    initialValue: kind,
-                    decoration: const InputDecoration(labelText: '图种'),
+                  DropdownButtonFormField<DiagramSkeleton>(
+                    initialValue: skeleton,
+                    isExpanded: true,
+                    decoration: const InputDecoration(labelText: '骨架模版'),
                     items: [
-                      for (final k in DiagramKind.values)
-                        DropdownMenuItem(value: k, child: Text(k.label)),
+                      for (final s in DiagramSkeleton.values)
+                        DropdownMenuItem(value: s, child: Text(s.label)),
                     ],
                     onChanged: (v) {
-                      if (v != null) setLocal(() => kind = v);
+                      if (v != null) setLocal(() => skeleton = v);
                     },
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    skeleton.desc,
+                    style: const TextStyle(
+                        fontSize: 11.5, color: _muted, height: 1.4),
                   ),
                   const SizedBox(height: 10),
                   TextField(
@@ -751,7 +764,7 @@ class _DrawingPageState extends State<DrawingPage> {
       final doc = svc.create(
         title: title.text,
         prompt: prompt.text,
-        kind: kind,
+        skeleton: skeleton,
         projectPaths: picked,
       );
       setState(() {
@@ -795,7 +808,7 @@ class _DrawingPageState extends State<DrawingPage> {
     if (dir == null) return;
     try {
       final safe = doc.title.replaceAll(RegExp(r'[\\/:*?"<>|]'), ' ').trim();
-      final name = '${safe.isEmpty ? '图' : safe}-${doc.kind.label}.png';
+      final name = '${safe.isEmpty ? '图' : safe}-${doc.skeleton.label}.png';
       final out = File('$dir${Platform.pathSeparator}$name');
       await File(doc.imagePath).copy(out.path);
       _toast('已导出：$name');
