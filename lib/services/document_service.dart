@@ -23,6 +23,48 @@ class _DiagramImage {
   final int cy;
 }
 
+/// 图中一块可编辑的文字区域，坐标为**相对最终（裁剪后）PNG** 的比例（0~1）。
+class DiagramTextBox {
+  DiagramTextBox({
+    required this.kind,
+    required this.nodeId,
+    required this.text,
+    required this.x,
+    required this.y,
+    required this.w,
+    required this.h,
+  });
+
+  /// 区块类型：node（节点）/ subgraph（分组标题）/ edge（连线文字）/
+  /// actor（时序参与者）/ message（时序消息）。
+  final String kind;
+
+  /// 对应的 Mermaid 节点/分组 id（node、subgraph 才有；其余为空）。
+  final String nodeId;
+
+  /// 渲染出的显示文字（用于提示与文本兜底定位）。
+  final String text;
+  final double x;
+  final double y;
+  final double w;
+  final double h;
+}
+
+/// 一次「带文字区块」的 Mermaid 渲染结果：高清 PNG + 图片像素尺寸 + 文字区块。
+class RenderedDiagram {
+  RenderedDiagram({
+    required this.png,
+    required this.width,
+    required this.height,
+    required this.labels,
+  });
+
+  final Uint8List png;
+  final int width;
+  final int height;
+  final List<DiagramTextBox> labels;
+}
+
 class DocumentTemplate {
   const DocumentTemplate({
     required this.id,
@@ -1014,6 +1056,136 @@ ${hasImages ? '  <Default Extension="png" ContentType="image/png"/>\n' : ''}  <O
     final im = await _renderMermaidToPng(code);
     if (im == null) return null;
     return Uint8List.fromList(im.png);
+  }
+
+  /// 渲染 Mermaid 为高清 PNG，并额外提取图中每块文字的位置（相对裁剪后
+  /// 图片的比例坐标），供「双击文字直接编辑」定位使用。失败返回 null。
+  ///
+  /// 两趟无头浏览器：一趟截图得到像素，一趟渲染 DOM 取每块文字的
+  /// getBoundingClientRect（相对 svg 的比例）。两趟渲染同一份 Mermaid，
+  /// 布局一致；再据裁剪后尺寸换算成最终图片上的比例框。
+  Future<RenderedDiagram?> renderMermaidDetailed(String code) async {
+    final shot = await HeadlessBrowser.capturePng(_mermaidHtml(code));
+    if (shot == null) return null;
+    final decoded = img.decodePng(shot);
+    if (decoded == null) return null;
+    final cropped = _autoCropWhite(decoded);
+    final png = Uint8List.fromList(img.encodePng(cropped));
+    final cw = cropped.width;
+    final ch = cropped.height;
+
+    final labels = <DiagramTextBox>[];
+    try {
+      final boxes = await _extractDiagramBoxes(code);
+      // _autoCropWhite 在图形四周各留 margin(20) 像素边距，内容区尺寸即
+      // (cw-40, ch-40)。svg 相对比例 → 裁剪后图片比例的换算。
+      const margin = 20;
+      final contentW = (cw - 2 * margin).toDouble();
+      final contentH = (ch - 2 * margin).toDouble();
+      if (contentW > 0 && contentH > 0) {
+        for (final b in boxes) {
+          final sx = (b['x'] as num?)?.toDouble();
+          final sy = (b['y'] as num?)?.toDouble();
+          final sw = (b['w'] as num?)?.toDouble();
+          final sh = (b['h'] as num?)?.toDouble();
+          final text = (b['text'] as String?)?.trim() ?? '';
+          if (sx == null || sy == null || sw == null || sh == null) continue;
+          if (text.isEmpty || sw <= 0 || sh <= 0) continue;
+          labels.add(
+            DiagramTextBox(
+              kind: (b['kind'] as String?) ?? 'node',
+              nodeId: (b['id'] as String?) ?? '',
+              text: text,
+              x: (margin + sx * contentW) / cw,
+              y: (margin + sy * contentH) / ch,
+              w: (sw * contentW) / cw,
+              h: (sh * contentH) / ch,
+            ),
+          );
+        }
+      }
+    } catch (_) {}
+
+    return RenderedDiagram(png: png, width: cw, height: ch, labels: labels);
+  }
+
+  /// 渲染 Mermaid 后用脚本收集每块文字的 svg 相对比例框，经 --dump-dom 取回。
+  Future<List<Map<String, dynamic>>> _extractDiagramBoxes(String code) async {
+    final tmp = await Directory.systemTemp.createTemp('mind_mmd_box_');
+    try {
+      final htmlFile = File(p.join(tmp.path, 'boxes.html'));
+      await htmlFile.writeAsString(_mermaidBoxHtml(code), encoding: utf8);
+      final dom = await HeadlessBrowser.renderDom(htmlFile.uri.toString());
+      if (dom == null) return const [];
+      final m = RegExp(
+        r'<script id="__boxes"[^>]*>([\s\S]*?)</script>',
+      ).firstMatch(dom);
+      if (m == null) return const [];
+      final data = jsonDecode(m.group(1)!.trim());
+      if (data is! List) return const [];
+      return data.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
+    } catch (_) {
+      return const [];
+    } finally {
+      try {
+        await tmp.delete(recursive: true);
+      } catch (_) {}
+    }
+  }
+
+  /// 与 [_mermaidHtml] 同样的布局，但渲染完成后收集文字区块的比例坐标，
+  /// 写入 `<script id="__boxes">` 供 --dump-dom 取回。
+  static String _mermaidBoxHtml(String code) {
+    final safe = const HtmlEscape(HtmlEscapeMode.element).convert(code);
+    return '''<!doctype html><html><head><meta charset="utf-8">
+<style>*{margin:0}html,body{background:#fff}
+body{display:inline-block;padding:16px}
+.mermaid{font-family:"Microsoft YaHei","SimSun",sans-serif;text-rendering:geometricPrecision}
+.mermaid svg{width:auto!important;max-width:none!important;height:auto!important;shape-rendering:geometricPrecision}</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head><body><pre class="mermaid">$safe</pre>
+<script>
+mermaid.initialize({startOnLoad:false,securityLevel:"loose",
+flowchart:{useMaxWidth:false,htmlLabels:true},
+sequence:{useMaxWidth:false},gantt:{useMaxWidth:false},
+er:{useMaxWidth:false},class:{useMaxWidth:false},state:{useMaxWidth:false}});
+async function collect(){
+  try{ await mermaid.run({querySelector:'.mermaid'}); }catch(e){}
+  var out=[];
+  var svg=document.querySelector('.mermaid svg');
+  if(svg){
+    var s=svg.getBoundingClientRect();
+    function push(kind,id,el){
+      if(!el) return;
+      var t=(el.textContent||'').replace(/\\s+/g,' ').trim();
+      if(!t) return;
+      var r=el.getBoundingClientRect();
+      if(r.width<=0||r.height<=0||s.width<=0||s.height<=0) return;
+      out.push({kind:kind,id:id||'',text:t,
+        x:(r.left-s.left)/s.width, y:(r.top-s.top)/s.height,
+        w:r.width/s.width, h:r.height/s.height});
+    }
+    function nid(el){ var m=(el.id||'').match(/^flowchart-(.+?)-\\d+\$/); return m?m[1]:''; }
+    svg.querySelectorAll('g.node').forEach(function(g){
+      push('node', nid(g), g.querySelector('.nodeLabel')||g.querySelector('foreignObject')||g);
+    });
+    svg.querySelectorAll('g.cluster').forEach(function(g){
+      push('subgraph', g.id||'', g.querySelector('.cluster-label')||g.querySelector('.nodeLabel'));
+    });
+    svg.querySelectorAll('g.edgeLabels .edgeLabel, g.edgeLabel').forEach(function(el){
+      push('edge','',el);
+    });
+    svg.querySelectorAll('text.actor').forEach(function(el){ push('actor','',el); });
+    svg.querySelectorAll('text.messageText').forEach(function(el){ push('message','',el); });
+  }
+  var sc=document.createElement('script');
+  sc.id='__boxes'; sc.type='application/json';
+  sc.textContent=JSON.stringify(out);
+  document.body.appendChild(sc);
+}
+collect();
+</script>
+</body></html>''';
   }
 
   Future<_DiagramImage?> _renderMermaidToPng(String code) async {

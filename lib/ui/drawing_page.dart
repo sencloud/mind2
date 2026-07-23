@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -315,6 +316,12 @@ class _DrawingPageState extends State<DrawingPage> {
           ),
           const SizedBox(width: 8),
           OutlinedButton.icon(
+            onPressed: doc.versions.isEmpty ? null : () => _openHistory(svc, doc),
+            icon: const Icon(Icons.history, size: 16),
+            label: Text('历史 ${doc.versions.length}'),
+          ),
+          const SizedBox(width: 8),
+          OutlinedButton.icon(
             onPressed: (svc.busy || !doc.hasImage) ? null : () => _export(doc),
             icon: const Icon(Icons.ios_share, size: 16),
             label: const Text('导出图片'),
@@ -533,20 +540,15 @@ class _DrawingPageState extends State<DrawingPage> {
       // 用内存图 + updatedAt 作 key，避免同名文件被图片缓存复用而不刷新。
       try {
         final bytes = File(doc.imagePath).readAsBytesSync();
-        return InteractiveViewer(
-          maxScale: 8,
-          child: Center(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Image.memory(
-                bytes,
-                key: ValueKey(
-                    '${doc.id}-${doc.updatedAt.microsecondsSinceEpoch}'),
-                fit: BoxFit.contain,
-                filterQuality: FilterQuality.high,
-              ),
-            ),
-          ),
+        final v = doc.active;
+        return _DiagramCanvas(
+          key: ValueKey('${doc.id}-${doc.updatedAt.microsecondsSinceEpoch}'),
+          bytes: bytes,
+          imageW: v?.imageW ?? 0,
+          imageH: v?.imageH ?? 0,
+          labels: doc.labels,
+          enabled: !svc.busy,
+          onEditLabel: (box) => _editLabel(svc, box),
         );
       } catch (_) {}
     }
@@ -795,7 +797,7 @@ class _DrawingPageState extends State<DrawingPage> {
   Future<void> _applySourceAndRender(DrawingService svc) async {
     final doc = svc.current;
     if (doc == null) return;
-    doc.mermaid = _source.text;
+    svc.setSource(_source.text);
     await svc.rerender();
     if (!mounted) return;
     if (svc.stage.startsWith('渲染失败')) _toast(svc.stage);
@@ -815,6 +817,195 @@ class _DrawingPageState extends State<DrawingPage> {
     } catch (e) {
       _toast('导出失败：$e');
     }
+  }
+
+  // ------------------------------------------------------------- 历史 / 改字
+
+  Future<void> _openHistory(DrawingService svc, DrawingDoc doc) async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => ListenableBuilder(
+        listenable: svc,
+        builder: (ctx, _) {
+          final cur = svc.current;
+          final versions = cur == null
+              ? const <DrawingVersion>[]
+              : cur.versions.reversed.toList();
+          return AlertDialog(
+            title: const Text('生成历史'),
+            content: SizedBox(
+              width: 640,
+              height: 460,
+              child: versions.isEmpty
+                  ? const Center(
+                      child: Text('暂无历史版本',
+                          style: TextStyle(fontSize: 13, color: _muted)),
+                    )
+                  : GridView.builder(
+                      gridDelegate:
+                          const SliverGridDelegateWithMaxCrossAxisExtent(
+                        maxCrossAxisExtent: 300,
+                        mainAxisExtent: 210,
+                        crossAxisSpacing: 12,
+                        mainAxisSpacing: 12,
+                      ),
+                      itemCount: versions.length,
+                      itemBuilder: (_, i) =>
+                          _historyCard(svc, cur!, versions[i]),
+                    ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('关闭'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _historyCard(
+      DrawingService svc, DrawingDoc doc, DrawingVersion v) {
+    final active = doc.activeVersionId == v.id ||
+        (doc.active?.id == v.id);
+    return Material(
+      color: const Color(0xFFF7F7F8),
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: () {
+          svc.openVersion(v.id);
+          Navigator.of(context).maybePop();
+        },
+        child: Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: active ? _accent : const Color(0xFFECECEE),
+              width: active ? 2 : 1,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(
+                child: ClipRRect(
+                  borderRadius:
+                      const BorderRadius.vertical(top: Radius.circular(9)),
+                  child: Container(
+                    color: Colors.white,
+                    alignment: Alignment.center,
+                    child: v.hasImage
+                        ? Image.file(
+                            File(v.imagePath),
+                            key: ValueKey('hist-${v.id}'),
+                            fit: BoxFit.contain,
+                            filterQuality: FilterQuality.medium,
+                          )
+                        : const Icon(Icons.code, size: 28, color: _muted),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 6, 4, 6),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _fmtTime(v.createdAt),
+                            style: const TextStyle(
+                                fontSize: 12, fontWeight: FontWeight.w600),
+                          ),
+                          Text(
+                            '${v.skeleton.label}${active ? ' · 当前' : ''}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: active ? _accent : _muted,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '删除该版本',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: svc.busy
+                          ? null
+                          : () => svc.deleteVersion(v.id),
+                      icon: const Icon(Icons.delete_outline, size: 16),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _editLabel(DrawingService svc, DiagramLabel box) async {
+    if (svc.busy) return;
+    final controller = TextEditingController(text: svc.labelSource(box));
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('编辑文字'),
+        content: SizedBox(
+          width: 420,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(
+                controller: controller,
+                autofocus: true,
+                minLines: 1,
+                maxLines: 5,
+                decoration: const InputDecoration(
+                  labelText: '文字内容',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                '回车换行会转为图内换行；修改后自动重新渲染。',
+                style: TextStyle(fontSize: 11.5, color: _muted),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    final text = controller.text;
+    controller.dispose();
+    if (ok != true) return;
+    final done = await svc.updateLabel(box, text);
+    if (!mounted) return;
+    if (!done) _toast(svc.stage.isEmpty ? '未能定位该文字，请改用「编辑源码」' : svc.stage);
+  }
+
+  static String _fmtTime(DateTime t) {
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${t.year}-${two(t.month)}-${two(t.day)} ${two(t.hour)}:${two(t.minute)}';
   }
 
   Future<void> _confirmDelete(DrawingService svc, DrawingDoc doc) async {
@@ -862,4 +1053,123 @@ class _DrawingPageState extends State<DrawingPage> {
           ),
         ),
       );
+}
+
+/// 可缩放的图预览：在图片上按比例叠加文字热区，双击热区直接编辑对应文字。
+class _DiagramCanvas extends StatelessWidget {
+  const _DiagramCanvas({
+    super.key,
+    required this.bytes,
+    required this.imageW,
+    required this.imageH,
+    required this.labels,
+    required this.enabled,
+    required this.onEditLabel,
+  });
+
+  final List<int> bytes;
+  final int imageW;
+  final int imageH;
+  final List<DiagramLabel> labels;
+  final bool enabled;
+  final void Function(DiagramLabel box) onEditLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final image = Image.memory(
+      Uint8List.fromList(bytes),
+      fit: BoxFit.contain,
+      filterQuality: FilterQuality.high,
+    );
+    // 缺少像素尺寸（旧版本/渲染异常）时退化为纯图，不叠加热区。
+    if (imageW <= 0 || imageH <= 0 || labels.isEmpty) {
+      return InteractiveViewer(
+        maxScale: 8,
+        child: Center(
+          child: Padding(padding: const EdgeInsets.all(16), child: image),
+        ),
+      );
+    }
+    final ar = imageW / imageH;
+    return InteractiveViewer(
+      maxScale: 8,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: LayoutBuilder(
+          builder: (context, con) {
+            var dispW = con.maxWidth;
+            var dispH = dispW / ar;
+            if (dispH > con.maxHeight) {
+              dispH = con.maxHeight;
+              dispW = dispH * ar;
+            }
+            return Center(
+              child: SizedBox(
+                width: dispW,
+                height: dispH,
+                child: Stack(
+                  children: [
+                    Positioned.fill(child: image),
+                    for (final box in labels)
+                      Positioned(
+                        left: box.x * dispW,
+                        top: box.y * dispH,
+                        width: box.w * dispW,
+                        height: box.h * dispH,
+                        child: _LabelHotspot(
+                          enabled: enabled,
+                          onEdit: () => onEditLabel(box),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+/// 单个文字热区：悬停高亮 + 双击触发编辑。
+class _LabelHotspot extends StatefulWidget {
+  const _LabelHotspot({required this.enabled, required this.onEdit});
+
+  final bool enabled;
+  final VoidCallback onEdit;
+
+  @override
+  State<_LabelHotspot> createState() => _LabelHotspotState();
+}
+
+class _LabelHotspotState extends State<_LabelHotspot> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: widget.enabled
+          ? SystemMouseCursors.click
+          : SystemMouseCursors.basic,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onDoubleTap: widget.enabled ? widget.onEdit : null,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          decoration: BoxDecoration(
+            color: _hover
+                ? _accent.withValues(alpha: 0.14)
+                : Colors.transparent,
+            border: _hover
+                ? Border.all(color: _accent.withValues(alpha: 0.7), width: 1.5)
+                : null,
+            borderRadius: BorderRadius.circular(4),
+          ),
+        ),
+      ),
+    );
+  }
 }

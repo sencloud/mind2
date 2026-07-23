@@ -373,7 +373,111 @@ class DrawingProjectRef {
       DrawingProjectRef(path: json['path'] as String? ?? '');
 }
 
-/// 一张图：主题需求 + 关联工程 + 图种 + Mermaid 源码 + 渲染 PNG。
+/// 图中一块可编辑的文字区域（持久化）。坐标为相对最终 PNG 的比例（0~1）。
+class DiagramLabel {
+  DiagramLabel({
+    required this.kind,
+    required this.nodeId,
+    required this.text,
+    required this.x,
+    required this.y,
+    required this.w,
+    required this.h,
+  });
+
+  final String kind;
+  final String nodeId;
+  final String text;
+  final double x;
+  final double y;
+  final double w;
+  final double h;
+
+  Map<String, dynamic> toJson() => {
+    'kind': kind,
+    'nodeId': nodeId,
+    'text': text,
+    'x': x,
+    'y': y,
+    'w': w,
+    'h': h,
+  };
+
+  factory DiagramLabel.fromJson(Map<String, dynamic> json) => DiagramLabel(
+    kind: json['kind'] as String? ?? 'node',
+    nodeId: json['nodeId'] as String? ?? '',
+    text: json['text'] as String? ?? '',
+    x: (json['x'] as num?)?.toDouble() ?? 0,
+    y: (json['y'] as num?)?.toDouble() ?? 0,
+    w: (json['w'] as num?)?.toDouble() ?? 0,
+    h: (json['h'] as num?)?.toDouble() ?? 0,
+  );
+}
+
+/// 一次生成的版本快照：Mermaid 源码 + 渲染 PNG + 文字区块。
+/// 每次「生成 / 重新生成」新增一条；手动编辑源码或双击改字在当前版本上原地更新。
+class DrawingVersion {
+  DrawingVersion({
+    required this.id,
+    required this.createdAt,
+    this.mermaid = '',
+    this.imagePath = '',
+    this.imageW = 0,
+    this.imageH = 0,
+    this.summary = '',
+    this.skeleton = DiagramSkeleton.layeredBands,
+    List<DiagramLabel>? labels,
+  }) : labels = labels ?? [];
+
+  final String id;
+  final DateTime createdAt;
+  String mermaid;
+  String imagePath;
+  int imageW;
+  int imageH;
+  String summary;
+
+  /// 生成该版本时所用的骨架模版（用于历史展示）。
+  DiagramSkeleton skeleton;
+  List<DiagramLabel> labels;
+
+  bool get hasImage =>
+      imagePath.trim().isNotEmpty && File(imagePath).existsSync();
+  bool get hasMermaid => mermaid.trim().isNotEmpty;
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'createdAt': createdAt.toIso8601String(),
+    'mermaid': mermaid,
+    'imagePath': imagePath,
+    'imageW': imageW,
+    'imageH': imageH,
+    'summary': summary,
+    'skeleton': skeleton.name,
+    'labels': labels.map((e) => e.toJson()).toList(),
+  };
+
+  factory DrawingVersion.fromJson(Map<String, dynamic> json) => DrawingVersion(
+    id:
+        json['id'] as String? ??
+        DateTime.now().microsecondsSinceEpoch.toString(),
+    createdAt:
+        DateTime.tryParse(json['createdAt'] as String? ?? '') ?? DateTime.now(),
+    mermaid: json['mermaid'] as String? ?? '',
+    imagePath: json['imagePath'] as String? ?? '',
+    imageW: (json['imageW'] as num?)?.toInt() ?? 0,
+    imageH: (json['imageH'] as num?)?.toInt() ?? 0,
+    summary: json['summary'] as String? ?? '',
+    skeleton: DiagramSkeleton.fromName(json['skeleton'] as String?),
+    labels: ((json['labels'] as List?) ?? [])
+        .whereType<Map>()
+        .map((e) => DiagramLabel.fromJson(e.cast<String, dynamic>()))
+        .toList(),
+  );
+}
+
+/// 一张图：主题需求 + 关联工程 + 图种 + 多个生成版本（历史）。
+/// [mermaid]/[imagePath]/[summary]/[labels] 皆映射到当前激活版本 [active]。
 class DrawingDoc {
   DrawingDoc({
     required this.id,
@@ -383,10 +487,10 @@ class DrawingDoc {
     this.prompt = '',
     this.skeleton = DiagramSkeleton.layeredBands,
     List<DrawingProjectRef>? linkedProjects,
-    this.mermaid = '',
-    this.imagePath = '',
-    this.summary = '',
-  }) : linkedProjects = linkedProjects ?? [];
+    List<DrawingVersion>? versions,
+    this.activeVersionId = '',
+  })  : linkedProjects = linkedProjects ?? [],
+        versions = versions ?? [];
 
   final String id;
   String title;
@@ -402,18 +506,47 @@ class DrawingDoc {
   /// 关联的工程（可 1 个或多个组合），用于据真实代码结构出图。
   List<DrawingProjectRef> linkedProjects;
 
-  /// 生成/编辑后的 Mermaid 源码。
-  String mermaid;
+  /// 历次生成的版本（按生成先后排列，最后一条为最新）。
+  List<DrawingVersion> versions;
 
-  /// 渲染出的 PNG 绝对路径（可能为空，表示未渲染或渲染失败）。
-  String imagePath;
+  /// 当前激活版本 id（预览/编辑作用于该版本）。
+  String activeVersionId;
 
-  /// 对该图的一句话说明（模型给出）。
-  String summary;
+  /// 当前激活版本（无版本时为 null）。
+  DrawingVersion? get active {
+    if (versions.isEmpty) return null;
+    return versions.firstWhere(
+      (v) => v.id == activeVersionId,
+      orElse: () => versions.last,
+    );
+  }
 
-  bool get hasImage =>
-      imagePath.trim().isNotEmpty && File(imagePath).existsSync();
-  bool get hasMermaid => mermaid.trim().isNotEmpty;
+  /// 新建一个版本并设为激活，返回该版本。
+  DrawingVersion addVersion() {
+    final now = DateTime.now();
+    final v = DrawingVersion(
+      id: now.microsecondsSinceEpoch.toString(),
+      createdAt: now,
+      skeleton: skeleton,
+    );
+    versions.add(v);
+    activeVersionId = v.id;
+    return v;
+  }
+
+  String get mermaid => active?.mermaid ?? '';
+  set mermaid(String v) => active?.mermaid = v;
+
+  String get imagePath => active?.imagePath ?? '';
+  set imagePath(String v) => active?.imagePath = v;
+
+  String get summary => active?.summary ?? '';
+  set summary(String v) => active?.summary = v;
+
+  List<DiagramLabel> get labels => active?.labels ?? const [];
+
+  bool get hasImage => active?.hasImage ?? false;
+  bool get hasMermaid => active?.hasMermaid ?? false;
   String get linkedNames =>
       linkedProjects.map((e) => e.name).where((e) => e.isNotEmpty).join('、');
 
@@ -425,28 +558,52 @@ class DrawingDoc {
     'prompt': prompt,
     'skeleton': skeleton.name,
     'linkedProjects': linkedProjects.map((e) => e.toJson()).toList(),
-    'mermaid': mermaid,
-    'imagePath': imagePath,
-    'summary': summary,
+    'versions': versions.map((e) => e.toJson()).toList(),
+    'activeVersionId': activeVersionId,
   };
 
-  factory DrawingDoc.fromJson(Map<String, dynamic> json) => DrawingDoc(
-    id: json['id'] as String,
-    title: json['title'] as String? ?? '未命名图',
-    createdAt:
-        DateTime.tryParse(json['createdAt'] as String? ?? '') ?? DateTime.now(),
-    updatedAt:
-        DateTime.tryParse(json['updatedAt'] as String? ?? '') ?? DateTime.now(),
-    prompt: json['prompt'] as String? ?? '',
-    skeleton: DiagramSkeleton.fromName(json['skeleton'] as String?),
-    linkedProjects: ((json['linkedProjects'] as List?) ?? [])
+  factory DrawingDoc.fromJson(Map<String, dynamic> json) {
+    final versions = ((json['versions'] as List?) ?? [])
         .whereType<Map>()
-        .map((e) => DrawingProjectRef.fromJson(e.cast<String, dynamic>()))
-        .toList(),
-    mermaid: json['mermaid'] as String? ?? '',
-    imagePath: json['imagePath'] as String? ?? '',
-    summary: json['summary'] as String? ?? '',
-  );
+        .map((e) => DrawingVersion.fromJson(e.cast<String, dynamic>()))
+        .toList();
+    // 旧数据：无 versions 但有单份 mermaid/imagePath 时，包装成一个版本。
+    if (versions.isEmpty &&
+        ((json['mermaid'] as String?)?.trim().isNotEmpty ?? false)) {
+      versions.add(
+        DrawingVersion(
+          id: DateTime.now().microsecondsSinceEpoch.toString(),
+          createdAt:
+              DateTime.tryParse(json['updatedAt'] as String? ?? '') ??
+              DateTime.now(),
+          mermaid: json['mermaid'] as String? ?? '',
+          imagePath: json['imagePath'] as String? ?? '',
+          summary: json['summary'] as String? ?? '',
+          skeleton: DiagramSkeleton.fromName(json['skeleton'] as String?),
+        ),
+      );
+    }
+    return DrawingDoc(
+      id: json['id'] as String,
+      title: json['title'] as String? ?? '未命名图',
+      createdAt:
+          DateTime.tryParse(json['createdAt'] as String? ?? '') ??
+          DateTime.now(),
+      updatedAt:
+          DateTime.tryParse(json['updatedAt'] as String? ?? '') ??
+          DateTime.now(),
+      prompt: json['prompt'] as String? ?? '',
+      skeleton: DiagramSkeleton.fromName(json['skeleton'] as String?),
+      linkedProjects: ((json['linkedProjects'] as List?) ?? [])
+          .whereType<Map>()
+          .map((e) => DrawingProjectRef.fromJson(e.cast<String, dynamic>()))
+          .toList(),
+      versions: versions,
+      activeVersionId:
+          json['activeVersionId'] as String? ??
+          (versions.isEmpty ? '' : versions.last.id),
+    );
+  }
 }
 
 /// 「画图」业务：据关联工程（真实代码结构）用大模型产出漂亮、完整的架构图
@@ -540,14 +697,55 @@ class DrawingService extends ChangeNotifier {
   Future<void> delete(DrawingDoc doc) async {
     docs.remove(doc);
     if (current == doc) current = null;
-    if (doc.imagePath.isNotEmpty) {
-      try {
-        final f = File(doc.imagePath);
-        if (await f.exists()) await f.delete();
-      } catch (_) {}
+    for (final v in doc.versions) {
+      await _deleteFile(v.imagePath);
     }
     notifyListeners();
     await _persist();
+  }
+
+  /// 设置当前版本的 Mermaid 源码（无版本时先建一个），供手动编辑源码后使用。
+  void setSource(String text) {
+    final doc = current;
+    if (doc == null) return;
+    if (doc.active == null) doc.addVersion();
+    doc.mermaid = text;
+    doc.updatedAt = DateTime.now();
+  }
+
+  /// 打开某个历史版本（设为激活版本），预览与编辑随即切换到该版本。
+  void openVersion(String versionId) {
+    final doc = current;
+    if (doc == null) return;
+    if (!doc.versions.any((v) => v.id == versionId)) return;
+    doc.activeVersionId = versionId;
+    doc.updatedAt = DateTime.now();
+    notifyListeners();
+    _persist();
+  }
+
+  /// 删除某个历史版本及其图片文件。删除激活版本后自动落到最新一版。
+  Future<void> deleteVersion(String versionId) async {
+    final doc = current;
+    if (doc == null) return;
+    final idx = doc.versions.indexWhere((v) => v.id == versionId);
+    if (idx < 0) return;
+    final removed = doc.versions.removeAt(idx);
+    await _deleteFile(removed.imagePath);
+    if (doc.activeVersionId == versionId) {
+      doc.activeVersionId = doc.versions.isEmpty ? '' : doc.versions.last.id;
+    }
+    doc.updatedAt = DateTime.now();
+    notifyListeners();
+    await _persist();
+  }
+
+  Future<void> _deleteFile(String path) async {
+    if (path.trim().isEmpty) return;
+    try {
+      final f = File(path);
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
   }
 
   Future<void> save() async {
@@ -618,8 +816,10 @@ class DrawingService extends ChangeNotifier {
       notifyListeners();
       final result = await _designDiagram(doc, context);
       if (_cancel) return;
-      doc.mermaid = result.$1;
-      if (result.$2.trim().isNotEmpty) doc.summary = result.$2.trim();
+      // 每次生成新增一个版本快照，保留历史。
+      final v = doc.addVersion();
+      v.mermaid = result.$1;
+      if (result.$2.trim().isNotEmpty) v.summary = result.$2.trim();
       doc.updatedAt = DateTime.now();
       notifyListeners();
       await _persist();
@@ -666,17 +866,104 @@ class DrawingService extends ChangeNotifier {
     }
   }
 
+  /// 读取某文字区块在当前 Mermaid 源码里的原始标签（供编辑框回填）。
+  /// 节点/分组按 id 精确定位；其余回退到渲染显示文字。`<br/>` 还原为换行。
+  String labelSource(DiagramLabel box) {
+    final src = current?.mermaid ?? '';
+    if (box.nodeId.isNotEmpty && (box.kind == 'node' || box.kind == 'subgraph')) {
+      final id = RegExp.escape(box.nodeId);
+      final re = box.kind == 'subgraph'
+          ? RegExp('subgraph\\s+$id\\s*\\[\\s*"([^"]*)"')
+          : RegExp(
+              '\\b$id\\s*(?:\\[\\(|\\(\\[|\\[\\[|\\(\\(|\\{\\{|\\[|\\(|\\{)\\s*"([^"]*)"',
+            );
+      final m = re.firstMatch(src);
+      if (m != null) return m.group(1)!.replaceAll('<br/>', '\n');
+    }
+    return box.text;
+  }
+
+  /// 把某文字区块的文字改为 [raw]，回写 Mermaid 源码并原地重渲染当前版本。
+  /// 定位不到时返回 false（提示改用源码编辑），不改动图。
+  Future<bool> updateLabel(DiagramLabel box, String raw) async {
+    final doc = current;
+    final v = doc?.active;
+    if (doc == null || v == null || busy) return false;
+    final updated = _applyLabelEdit(v.mermaid, box, raw);
+    if (updated == null || updated == v.mermaid) return false;
+    v.mermaid = updated;
+    _begin('正在渲染高清图…');
+    try {
+      await _render(doc);
+      stage = v.hasImage ? '已更新' : '渲染失败：请检查 Mermaid 源码或本机浏览器（Edge/Chrome）';
+      await _persist();
+      return v.hasImage;
+    } catch (e) {
+      stage = '渲染失败：$e';
+      return false;
+    } finally {
+      _end();
+    }
+  }
+
+  /// 在源码中替换某区块的文字：节点/分组按 id 精确替换；其余按原文首次出现替换。
+  /// 换行统一转为 `<br/>`，双引号转为单引号以免破坏 Mermaid 语法。
+  static String? _applyLabelEdit(String src, DiagramLabel box, String raw) {
+    final text = raw
+        .replaceAll('"', "'")
+        .replaceAll(RegExp(r'\r\n|\r|\n'), '<br/>')
+        .trim();
+    if (box.nodeId.isNotEmpty &&
+        (box.kind == 'node' || box.kind == 'subgraph')) {
+      final id = RegExp.escape(box.nodeId);
+      final re = box.kind == 'subgraph'
+          ? RegExp('(subgraph\\s+$id\\s*\\[\\s*")([^"]*)(")')
+          : RegExp(
+              '(\\b$id\\s*(?:\\[\\(|\\(\\[|\\[\\[|\\(\\(|\\{\\{|\\[|\\(|\\{)\\s*")([^"]*)(")',
+            );
+      if (re.hasMatch(src)) {
+        return src.replaceFirstMapped(re, (m) => '${m[1]}$text${m[3]}');
+      }
+    }
+    // 连线文字 / 时序参与者/消息，或 id 不匹配：按原文首次出现替换。
+    final old = box.text.trim();
+    if (old.isNotEmpty && src.contains(old)) {
+      return src.replaceFirst(old, text);
+    }
+    return null;
+  }
+
   Future<void> _render(DrawingDoc doc) async {
-    final png = await document.renderMermaidPng(doc.mermaid);
-    if (png == null) {
-      doc.imagePath = '';
+    final v = doc.active;
+    if (v == null) return;
+    final detail = await document.renderMermaidDetailed(v.mermaid);
+    if (detail == null) {
+      v.imagePath = '';
+      v.labels = [];
+      v.imageW = 0;
+      v.imageH = 0;
       return;
     }
     final dir = _assetDir;
     if (dir == null) return;
-    final out = File(p.join(dir.path, '${doc.id}.png'));
-    await out.writeAsBytes(png, flush: true);
-    doc.imagePath = out.path;
+    final out = File(p.join(dir.path, '${doc.id}-${v.id}.png'));
+    await out.writeAsBytes(detail.png, flush: true);
+    v.imagePath = out.path;
+    v.imageW = detail.width;
+    v.imageH = detail.height;
+    v.labels = detail.labels
+        .map(
+          (b) => DiagramLabel(
+            kind: b.kind,
+            nodeId: b.nodeId,
+            text: b.text,
+            x: b.x,
+            y: b.y,
+            w: b.w,
+            h: b.h,
+          ),
+        )
+        .toList();
     doc.updatedAt = DateTime.now();
   }
 
