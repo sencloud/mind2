@@ -3,11 +3,12 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../models.dart';
+import '../util/text_util.dart';
+import 'agent/model_client.dart';
 import 'project_doc_service.dart';
 import 'project_service.dart';
 import 'ripgrep.dart';
@@ -335,7 +336,6 @@ class PaperService extends ChangeNotifier {
 
   bool _cancel = false;
   File? _store;
-  http.Client? _client;
 
   Future<void> init() async {
     final dir = await getApplicationSupportDirectory();
@@ -532,15 +532,15 @@ class PaperService extends ChangeNotifier {
 {"topics":[{"titleZh":"...","titleEn":"...","summary":"研究问题：… 创新点：… 方法要点：… 关键词：…"}]}
 
 智能体对关联工程的深挖分析：
-${exploreBlock.isEmpty ? '（无）' : _clip(exploreBlock, 16000)}
+${exploreBlock.isEmpty ? '（无）' : clip(exploreBlock, 16000)}
 
 来源研究报告标题：${draft.sourceResearchTitle.isEmpty ? '（无）' : draft.sourceResearchTitle}
 来源研究报告正文：
-${draft.sourceBody.trim().isEmpty ? '（无）' : _clip(draft.sourceBody, 6000)}
+${draft.sourceBody.trim().isEmpty ? '（无）' : clip(draft.sourceBody, 6000)}
 ''',
       },
     ], jsonMode: true);
-    final obj = _parseJson(reply);
+    final obj = ModelClient.parseJsonObject(reply);
     final out = <PaperTopicOption>[];
     for (final raw in ((obj['topics'] as List?) ?? []).whereType<Map>()) {
       final zh = (raw['titleZh'] ?? '').toString().trim();
@@ -792,10 +792,10 @@ ${opinions.join('\n\n')}
 请根据「修订清单」与「研究设定基线」，修订并润色下面这一节，落实其中与本节相关的意见。
 
 修订清单（审校意见）：
-${_clip(draft.reviewReport, 6000)}
+${clip(draft.reviewReport, 6000)}
 
 统一研究设定 / 事实基线：
-${draft.factBaseline.trim().isEmpty ? '（无）' : _clip(draft.factBaseline, 4000)}
+${draft.factBaseline.trim().isEmpty ? '（无）' : clip(draft.factBaseline, 4000)}
 
 本节标题：${english ? section.enTitle : section.zhTitle}
 
@@ -837,7 +837,7 @@ $current
       buf
         ..writeln('## $title')
         ..writeln()
-        ..writeln(_clip(body, 3200))
+        ..writeln(clip(body, 3200))
         ..writeln();
     }
     return buf.toString().trim();
@@ -884,11 +884,11 @@ $current
 ${projectBlock.isEmpty ? '（无）' : projectBlock}
 
 选定选题的相关信息：
-${draft.topicBrief.trim().isEmpty ? '（无）' : _clip(draft.topicBrief, 2000)}
+${draft.topicBrief.trim().isEmpty ? '（无）' : clip(draft.topicBrief, 2000)}
 
 来源研究报告标题：${draft.sourceResearchTitle.isEmpty ? '（无）' : draft.sourceResearchTitle}
 来源研究报告正文：
-${draft.sourceBody.trim().isEmpty ? '（无）' : _clip(draft.sourceBody, 8000)}
+${draft.sourceBody.trim().isEmpty ? '（无）' : clip(draft.sourceBody, 8000)}
 ''',
       },
     ]);
@@ -1095,9 +1095,6 @@ $context
     if (!busy) return;
     _cancel = true;
     stage = '正在停止…';
-    try {
-      _client?.close();
-    } catch (_) {}
     notifyListeners();
   }
 
@@ -1110,7 +1107,7 @@ $context
     try {
       final dir = Directory(p.join(settings.vaultPath, '4-书稿', '论文'));
       await dir.create(recursive: true);
-      final baseName = _sanitize(draft.titleZh);
+      final baseName = sanitizeFileName(draft.titleZh, fallback: '未命名论文');
       final outputs = <String>[];
       if (lang.writeZh) {
         stage = '正在导出中文 PDF…';
@@ -1171,7 +1168,7 @@ $context
     if (draft == null) throw StateError('未打开论文');
     final dir = Directory(p.join(settings.vaultPath, '4-书稿', '论文'));
     await dir.create(recursive: true);
-    final baseName = _sanitize(draft.titleZh);
+    final baseName = sanitizeFileName(draft.titleZh, fallback: '未命名论文');
     final zhFile = File(p.join(dir.path, '$baseName-中文稿.md'));
     final enFile = File(p.join(dir.path, '$baseName-英文稿.md'));
     await zhFile.writeAsString(
@@ -1317,11 +1314,11 @@ $titleRule
 {"titleZh":"...","titleEn":"...","sections":[{"zhTitle":"摘要","enTitle":"Abstract","brief":"本节写作要点"}]}
 
 统一研究设定 / 事实基线：
-${draft.factBaseline.trim().isEmpty ? '（无）' : _clip(draft.factBaseline, 9000)}
+${draft.factBaseline.trim().isEmpty ? '（无）' : clip(draft.factBaseline, 9000)}
 ''',
       },
     ], jsonMode: true);
-    final plan = _parseJson(reply);
+    final plan = ModelClient.parseJsonObject(reply);
     draft.titleZh = (plan['titleZh'] ?? draft.titleZh).toString().trim();
     draft.titleEn = (plan['titleEn'] ?? draft.titleEn).toString().trim();
     final rawSections = (plan['sections'] as List?) ?? [];
@@ -1368,57 +1365,37 @@ ${draft.factBaseline.trim().isEmpty ? '（无）' : _clip(draft.factBaseline, 90
       },
     ];
     // 长流式响应常被服务端/中间代理中途断开（Connection closed while receiving
-    // data）。这里对「网络中断」做有限次数重试：清空本节已生成内容后整节重写，
-    // 避免任何一次断线就让整篇写作失败。用户主动停止或非网络类错误不重试。
-    const maxAttempts = 3;
-    Object? lastError;
+    // data）。用 ModelClient.streamWithRetry 做有限次数断线重试：每次重试前清空
+    // 本节已生成内容后整节重写，避免任何一次断线就让整篇写作失败。
     final baseStage = stage;
-    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
-      if (_cancel) break;
-      var acc = '';
-      try {
-        await for (final delta in _streamChat(messages)) {
-          if (_cancel) break;
-          acc += delta;
-          if (english) {
-            section.en = acc;
-          } else {
-            section.zh = acc;
-          }
-          notifyListeners();
-        }
-        return acc.trim();
-      } catch (e) {
-        lastError = e;
-        if (_cancel || !_isTransientNetworkError(e)) rethrow;
-        if (english) {
-          section.en = '';
-        } else {
-          section.zh = '';
-        }
-        stage = '$baseStage 网络中断，正在重试（$attempt/$maxAttempts）…';
-        notifyListeners();
-        await Future.delayed(Duration(seconds: attempt * 2));
+    var acc = '';
+    void write(String text) {
+      if (english) {
+        section.en = text;
+      } else {
+        section.zh = text;
       }
     }
-    if (_cancel) return english ? section.en.trim() : section.zh.trim();
-    throw Exception('本节连续 $maxAttempts 次因网络中断写作失败：$lastError');
-  }
 
-  /// 判断是否为可重试的瞬时网络错误（连接被断开 / 超时等），而非模型/参数错误。
-  static bool _isTransientNetworkError(Object e) {
-    if (e is SocketException || e is TimeoutException) return true;
-    if (e is http.ClientException) return true;
-    final s = e.toString().toLowerCase();
-    return s.contains('connection closed') ||
-        s.contains('connection reset') ||
-        s.contains('connection terminated') ||
-        s.contains('connection refused') ||
-        s.contains('broken pipe') ||
-        s.contains('timed out') ||
-        s.contains('timeout') ||
-        s.contains('httpexception') ||
-        s.contains('clientexception');
+    final turn = await ModelClient(settings, role: ModelRole.writing)
+        .streamWithRetry(
+      messages: messages,
+      onTextDelta: (delta) {
+        acc += delta;
+        write(acc);
+        notifyListeners();
+      },
+      isCancelled: () => _cancel,
+      idleTimeout: const Duration(seconds: 90),
+      onAttempt: (attempt) {
+        acc = '';
+        write('');
+        stage = '$baseStage 网络中断，正在重试（${attempt - 1}/3）…';
+        notifyListeners();
+      },
+    );
+    if (_cancel) return english ? section.en.trim() : section.zh.trim();
+    return turn.content.trim();
   }
 
   String _chineseSystem(PaperDraft draft) {
@@ -1452,7 +1429,7 @@ ${draft.factBaseline.trim().isEmpty ? '（无）' : _clip(draft.factBaseline, 90
     for (final proj in withDigest) {
       buf
         ..writeln('## 工程：${proj.name}')
-        ..writeln(_clip(proj.digest, perProject))
+        ..writeln(clip(proj.digest, perProject))
         ..writeln();
     }
     return buf.toString().trim();
@@ -1478,7 +1455,7 @@ ${draft.factBaseline.trim().isEmpty ? '（无）' : _clip(draft.factBaseline, 90
         : '''
 
 统一研究设定 / 事实基线（全篇唯一事实来源，本节所有数据、设定、结论必须与之一致）：
-${_clip(draft.factBaseline, 9000)}
+${clip(draft.factBaseline, 9000)}
 ''';
     final figureBlock = _figurePromptHint(draft, section, english: english);
     return '''
@@ -1856,7 +1833,7 @@ $baselineBlock$figureBlock
     final built = File(pdfPath);
     if (!await built.exists()) {
       final err = '${result.stdout}\n${result.stderr}'.trim();
-      throw Exception('pandoc 生成 PDF 失败：${_clip(err, 1800)}');
+      throw Exception('pandoc 生成 PDF 失败：${clip(err, 1800)}');
     }
     await output.parent.create(recursive: true);
     await built.copy(output.path);
@@ -1934,7 +1911,7 @@ $baselineBlock$figureBlock
       if (result.exitCode != 0) {
         throw Exception(
           '图表渲染失败（请确认已安装 matplotlib）：'
-          '${_clip('${result.stdout}\n${result.stderr}'.trim(), 1200)}',
+          '${clip('${result.stdout}\n${result.stderr}'.trim(), 1200)}',
         );
       }
       final figures = <PaperFigure>[];
@@ -1999,14 +1976,14 @@ $baselineBlock$figureBlock
 严格输出 JSON：{"figures":[ {...}, {...} ]}
 
 统一研究设定 / 事实基线：
-${draft.factBaseline.trim().isEmpty ? '（无）' : _clip(draft.factBaseline, 4000)}
+${draft.factBaseline.trim().isEmpty ? '（无）' : clip(draft.factBaseline, 4000)}
 
 论文正文：
 ${paperText(draft, english)}
 ''',
       },
     ], jsonMode: true);
-    final obj = _parseJson(reply);
+    final obj = ModelClient.parseJsonObject(reply);
     final list = <Map<String, dynamic>>[];
     for (final raw in ((obj['figures'] as List?) ?? []).whereType<Map>()) {
       list.add(raw.cast<String, dynamic>());
@@ -2015,7 +1992,7 @@ ${paperText(draft, english)}
   }
 
   String paperText(PaperDraft draft, bool english) =>
-      _clip(_fullPaperText(draft, english: english), 12000);
+      clip(_fullPaperText(draft, english: english), 12000);
 
   Future<List<String>> _resolvePython() async {
     for (final cmd in [
@@ -2210,7 +2187,7 @@ main()
       if (interesting.length >= 3) break;
     }
     final message = interesting.isEmpty ? source : interesting.join('\n\n');
-    return _clip(message, 1800);
+    return clip(message, 1800);
   }
 
   Future<String> _resolveXelatex() async {
@@ -2729,7 +2706,6 @@ main()
   void _end() {
     busy = false;
     _cancel = false;
-    _client = null;
     notifyListeners();
   }
 
@@ -2740,115 +2716,19 @@ main()
     );
   }
 
+  /// 论文写作类一次性调用：统一走 [ModelClient] 的 writing 角色通道。
   Future<String> _chat(
     List<Map<String, String>> messages, {
     bool jsonMode = false,
   }) async {
-    // 论文写作类一次性调用走 writing 角色通道（默认仍是 DeepSeek，可在设置里改）。
-    const role = ModelRole.writing;
-    final client = _client = http.Client();
-    try {
-      final resp = await client.post(
-        Uri.parse('${settings.roleBaseUrl(role)}/chat/completions'),
-        headers: {
-          'Authorization': 'Bearer ${settings.roleApiKey(role)}',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'model': settings.roleModel(role),
-          'stream': false,
-          if (jsonMode) 'response_format': {'type': 'json_object'},
-          'messages': messages,
-        }),
-      );
-      if (resp.statusCode != 200) {
-        throw Exception(
-          'HTTP ${resp.statusCode} ${utf8.decode(resp.bodyBytes)}',
-        );
-      }
-      final json =
-          jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
-      final content =
-          (json['choices']?[0]?['message']?['content'] as String?)?.trim() ??
-          '';
-      if (content.isEmpty) throw Exception('模型未返回内容');
-      return content;
-    } finally {
-      client.close();
-      if (identical(_client, client)) _client = null;
-    }
-  }
-
-  Stream<String> _streamChat(List<Map<String, String>> messages) async* {
-    // 论文各节正文生成走 writing 角色通道。
-    const role = ModelRole.writing;
-    final request = http.Request(
-      'POST',
-      Uri.parse('${settings.roleBaseUrl(role)}/chat/completions'),
+    final content = await ModelClient(settings, role: ModelRole.writing)
+        .complete(
+      messages: messages,
+      jsonMode: jsonMode,
+      isCancelled: () => _cancel,
     );
-    request.headers['Authorization'] = 'Bearer ${settings.roleApiKey(role)}';
-    request.headers['Content-Type'] = 'application/json';
-    request.body = jsonEncode({
-      'model': settings.roleModel(role),
-      'messages': messages,
-      'stream': true,
-    });
-
-    final client = _client = http.Client();
-    try {
-      final response = await client
-          .send(request)
-          .timeout(const Duration(seconds: 60));
-      if (response.statusCode != 200) {
-        final body = await response.stream.bytesToString();
-        throw Exception('HTTP ${response.statusCode} $body');
-      }
-      var buffer = '';
-      // 空闲超时：若长时间没有新数据流入，判定连接假死并抛出，由上层重试。
-      await for (final chunk in response.stream
-          .transform(utf8.decoder)
-          .timeout(const Duration(seconds: 90))) {
-        if (_cancel) return;
-        buffer += chunk;
-        while (true) {
-          final newline = buffer.indexOf('\n');
-          if (newline < 0) break;
-          final line = buffer.substring(0, newline).trim();
-          buffer = buffer.substring(newline + 1);
-          if (!line.startsWith('data:')) continue;
-          final data = line.substring(5).trim();
-          if (data.isEmpty) continue;
-          if (data == '[DONE]') return;
-          try {
-            final json = jsonDecode(data) as Map<String, dynamic>;
-            final content =
-                json['choices']?[0]?['delta']?['content'] as String?;
-            if (content != null && content.isNotEmpty) yield content;
-          } catch (_) {
-            // 忽略无法解析的流式片段。
-          }
-        }
-      }
-    } finally {
-      client.close();
-      if (identical(_client, client)) _client = null;
-    }
-  }
-
-  Map<String, dynamic> _parseJson(String reply) {
-    final start = reply.indexOf('{');
-    final end = reply.lastIndexOf('}');
-    if (start < 0 || end <= start) throw Exception('模型未返回 JSON');
-    return jsonDecode(reply.substring(start, end + 1)) as Map<String, dynamic>;
-  }
-
-  static String _clip(String value, int max) =>
-      value.length <= max ? value : value.substring(0, max);
-
-  static String _sanitize(String value) {
-    var out = value.replaceAll(RegExp(r'[\\/:*?"<>|]'), ' ').trim();
-    if (out.length > 80) out = out.substring(0, 80).trim();
-    return out.isEmpty ? '未命名论文' : out;
+    if (content.isEmpty) throw Exception('模型未返回内容');
+    return content;
   }
 
   static String _stripResearchPrefix(String title) =>

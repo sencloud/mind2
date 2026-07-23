@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:http/http.dart' as http;
 
+import '../../util/text_util.dart';
 import '../settings_service.dart';
 
 /// 文本向量化客户端：调用 OpenAI 兼容的 `/embeddings` 接口
@@ -106,6 +107,5 @@ class EmbeddingClient {
     return [for (final x in v) x / norm];
   }
 
-  static String _clip(String s, int max) =>
-      s.length <= max ? s : '${s.substring(0, max)}…';
+  static String _clip(String s, int max) => clip(s, max, suffix: '…');
 }

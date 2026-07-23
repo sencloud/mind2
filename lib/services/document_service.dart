@@ -3,7 +3,6 @@ import 'dart:io';
 
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 import 'package:image/image.dart' as img;
 import 'package:markdown/markdown.dart' as md;
 import 'package:path/path.dart' as p;
@@ -11,6 +10,9 @@ import 'package:path_provider/path_provider.dart';
 import 'package:pdfrx/pdfrx.dart';
 import 'package:xml/xml.dart';
 
+import '../util/text_util.dart';
+import 'agent/model_client.dart';
+import 'headless_browser.dart';
 import 'settings_service.dart';
 
 /// 已渲染的图（Mermaid → PNG），用于嵌入 docx。cx/cy 为显示尺寸（EMU）。
@@ -239,7 +241,6 @@ class DocumentService extends ChangeNotifier {
   String stage = '';
 
   File? _store;
-  http.Client? _client;
 
   Future<void> init() async {
     final dir = await getApplicationSupportDirectory();
@@ -640,7 +641,7 @@ ${draft.content}
 内置写作要求：
 ${template.requirements}
 
-${draft.templateText.trim().isEmpty ? '' : '用户上传的模板（docx 或 Excel）解析内容如下，请严格参考其结构、栏目和格式层级（Excel 模板含多个工作表，已用「## 工作表：名称」分隔，请按各工作表的栏目逐一组织内容）：\n${_clip(draft.templateText, 12000)}\n'}
+${draft.templateText.trim().isEmpty ? '' : '用户上传的模板（docx 或 Excel）解析内容如下，请严格参考其结构、栏目和格式层级（Excel 模板含多个工作表，已用「## 工作表：名称」分隔，请按各工作表的栏目逐一组织内容）：\n${clip(draft.templateText, 12000)}\n'}
 ${draft.references.isEmpty ? '' : '参考资料如下，请优先依据这些资料进行事实陈述、问题分析、数据口径和论证组织：\n${_formatReferences(draft.references)}\n'}
 输出要求：
 - 使用中文。
@@ -677,7 +678,7 @@ ${draft.references.isEmpty ? '' : '参考资料如下，请优先依据这些资
 内容要求（用于把握每个工作表该填什么）：
 ${template.requirements}
 
-${draft.templateText.trim().isEmpty ? '' : '用户上传的 Excel 模板已解析如下（用「## 工作表：名称」分隔各工作表，并列出其列名/栏目），请严格沿用这些工作表名与列名：\n${_clip(draft.templateText, 12000)}\n'}
+${draft.templateText.trim().isEmpty ? '' : '用户上传的 Excel 模板已解析如下（用「## 工作表：名称」分隔各工作表，并列出其列名/栏目），请严格沿用这些工作表名与列名：\n${clip(draft.templateText, 12000)}\n'}
 ${draft.references.isEmpty ? '' : '参考资料如下，请优先依据这些资料填写：\n${_formatReferences(draft.references)}\n'}
 输出格式（务必严格遵守，便于导出为 Excel）：
 - 每个工作表用一个二级标题表示：`## 工作表：<工作表名称>`
@@ -1007,11 +1008,8 @@ ${hasImages ? '  <Default Extension="png" ContentType="image/png"/>\n' : ''}  <O
     return buf.toString();
   }
 
-  /// Mermaid 截图的设备像素倍率：3x 保证放大查看依然清晰。
-  static const _mermaidScale = 3;
-
   /// 公开包装：把一段 Mermaid 代码渲染为 PNG 字节（失败返回 null）。
-  /// 供「项目概览」架构图等场景复用 docx 的无头浏览器渲染管线。
+  /// 供「项目概览」架构图等场景复用统一的无头浏览器高清渲染管线。
   Future<Uint8List?> renderMermaidPng(String code) async {
     final im = await _renderMermaidToPng(code);
     if (im == null) return null;
@@ -1019,66 +1017,40 @@ ${hasImages ? '  <Default Extension="png" ContentType="image/png"/>\n' : ''}  <O
   }
 
   Future<_DiagramImage?> _renderMermaidToPng(String code) async {
-    final browser = _browserPath();
-    if (browser == null) return null;
-    final tmp = await Directory.systemTemp.createTemp('mind_mermaid_');
-    try {
-      final html = File(p.join(tmp.path, 'diagram.html'));
-      await html.writeAsString(_mermaidHtml(code), encoding: utf8);
-      final png = File(p.join(tmp.path, 'out.png'));
-      final result = await Process.run(
-        browser,
-        [
-          '--headless=new',
-          '--disable-gpu',
-          '--no-sandbox',
-          '--hide-scrollbars',
-          '--user-data-dir=${p.join(tmp.path, 'ud')}',
-          '--screenshot=${png.path}',
-          '--window-size=2200,1600',
-          '--force-device-scale-factor=$_mermaidScale',
-          '--default-background-color=FFFFFFFF',
-          '--virtual-time-budget=12000',
-          '--run-all-compositor-stages-before-draw',
-          html.uri.toString(),
-        ],
-        stdoutEncoding: utf8,
-        stderrEncoding: utf8,
-      ).timeout(const Duration(seconds: 45));
-      if (result.exitCode != 0 || !await png.exists()) return null;
-      final decoded = img.decodePng(await png.readAsBytes());
-      if (decoded == null) return null;
-      final cropped = _autoCropWhite(decoded);
-      final bytes = img.encodePng(cropped);
-      // 截图用了 _mermaidScale 倍设备像素，故每逻辑像素 = 9525/scale EMU；
-      // 再限制最大显示宽度。
-      const emuPerPx = 9525 ~/ _mermaidScale;
-      var cx = cropped.width * emuPerPx;
-      var cy = cropped.height * emuPerPx;
-      const maxCx = 5400000; // 约 5.9 英寸，适配 A4 正文宽度
-      if (cx > maxCx) {
-        cy = (cy * maxCx / cx).round();
-        cx = maxCx;
-      }
-      if (cx <= 0 || cy <= 0) return null;
-      return _DiagramImage(png: bytes, cx: cx, cy: cy);
-    } catch (_) {
-      return null;
-    } finally {
-      try {
-        await tmp.delete(recursive: true);
-      } catch (_) {}
+    final shot = await HeadlessBrowser.capturePng(_mermaidHtml(code));
+    if (shot == null) return null;
+    final decoded = img.decodePng(shot);
+    if (decoded == null) return null;
+    final cropped = _autoCropWhite(decoded);
+    final bytes = img.encodePng(cropped);
+    // 截图用了 pngScale 倍设备像素，故每逻辑像素 = 9525/scale EMU；再限制最大显示宽度。
+    const emuPerPx = 9525 ~/ HeadlessBrowser.pngScale;
+    var cx = cropped.width * emuPerPx;
+    var cy = cropped.height * emuPerPx;
+    const maxCx = 5400000; // 约 5.9 英寸，适配 A4 正文宽度
+    if (cx > maxCx) {
+      cy = (cy * maxCx / cx).round();
+      cx = maxCx;
     }
+    if (cx <= 0 || cy <= 0) return null;
+    return _DiagramImage(png: bytes, cx: cx, cy: cy);
   }
 
   static String _mermaidHtml(String code) {
     final safe = const HtmlEscape(HtmlEscapeMode.element).convert(code);
+    // useMaxWidth:false + width/height:auto 让 SVG 按内容自然尺寸渲染，不被容器压缩；
+    // 配合 4x 设备像素倍率输出高清 PNG。geometricPrecision 让文字与线条更锐利。
     return '''<!doctype html><html><head><meta charset="utf-8">
-<style>*{margin:0}html,body{background:#fff}body{display:inline-block;padding:12px}
-.mermaid{font-family:"Microsoft YaHei","SimSun",sans-serif}</style>
+<style>*{margin:0}html,body{background:#fff}
+body{display:inline-block;padding:16px}
+.mermaid{font-family:"Microsoft YaHei","SimSun",sans-serif;text-rendering:geometricPrecision}
+.mermaid svg{width:auto!important;max-width:none!important;height:auto!important;shape-rendering:geometricPrecision}</style>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
 </head><body><pre class="mermaid">$safe</pre>
-<script>mermaid.initialize({startOnLoad:true,securityLevel:"loose"});</script>
+<script>mermaid.initialize({startOnLoad:true,securityLevel:"loose",
+flowchart:{useMaxWidth:false,htmlLabels:true},
+sequence:{useMaxWidth:false},gantt:{useMaxWidth:false},
+er:{useMaxWidth:false},class:{useMaxWidth:false},state:{useMaxWidth:false}});</script>
 </body></html>''';
   }
 
@@ -1318,39 +1290,8 @@ $ctOverrides
   static String _xmlAttr(String s) =>
       const HtmlEscape(HtmlEscapeMode.attribute).convert(s);
 
-  Future<void> _printHtmlToPdf(File html, File out) async {
-    final browser = _browserPath();
-    if (browser == null) {
-      throw Exception('未找到 Edge 或 Chrome，无法导出 PDF');
-    }
-    final tmp = await Directory.systemTemp.createTemp('mind_doc_pdf_');
-    try {
-      final result = await Process.run(
-        browser,
-        [
-          '--headless=new',
-          '--disable-gpu',
-          '--no-sandbox',
-          '--user-data-dir=${tmp.path}',
-          '--print-to-pdf=${out.path}',
-          '--print-to-pdf-no-header',
-          '--no-pdf-header-footer',
-          html.uri.toString(),
-        ],
-        stdoutEncoding: utf8,
-        stderrEncoding: utf8,
-      ).timeout(const Duration(seconds: 60));
-      if (result.exitCode != 0 || !await out.exists()) {
-        throw Exception(
-          'PDF 导出失败：${(result.stderr as String?)?.trim() ?? result.exitCode}',
-        );
-      }
-    } finally {
-      try {
-        await tmp.delete(recursive: true);
-      } catch (_) {}
-    }
-  }
+  Future<void> _printHtmlToPdf(File html, File out) =>
+      HeadlessBrowser.printPdf(html, out);
 
   Future<void> _openExportDirectory(String path) async {
     try {
@@ -1371,38 +1312,11 @@ $ctOverrides
     );
   }
 
-  Future<String> _chat(List<Map<String, String>> messages) async {
-    // 正式文档生成走 writing 角色通道（默认仍是 DeepSeek，可在设置里改）。
-    const role = ModelRole.writing;
-    final client = _client = http.Client();
-    try {
-      final resp = await client.post(
-        Uri.parse('${settings.roleBaseUrl(role)}/chat/completions'),
-        headers: {
-          'Authorization': 'Bearer ${settings.roleApiKey(role)}',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'model': settings.roleModel(role),
-          'stream': false,
-          'messages': messages,
-        }),
-      );
-      if (resp.statusCode != 200) {
-        throw Exception(
-          'HTTP ${resp.statusCode} ${utf8.decode(resp.bodyBytes)}',
-        );
-      }
-      final json = jsonDecode(utf8.decode(resp.bodyBytes));
-      return (json['choices']?[0]?['message']?['content'] as String?) ?? '';
-    } finally {
-      client.close();
-      if (identical(_client, client)) _client = null;
-    }
+  /// 正式文档生成：统一走 [ModelClient] 的 writing 角色通道。
+  Future<String> _chat(List<Map<String, String>> messages) {
+    return ModelClient(settings, role: ModelRole.writing)
+        .complete(messages: messages);
   }
-
-  static String _clip(String value, int max) =>
-      value.length <= max ? value : value.substring(0, max);
 
   static String _formatReferences(List<ReferenceDocument> refs) {
     final buf = StringBuffer();
@@ -1410,10 +1324,10 @@ $ctOverrides
       final ref = refs[i];
       buf
         ..writeln('【参考资料 ${i + 1}：${ref.name}】')
-        ..writeln(_clip(ref.text, 6000))
+        ..writeln(clip(ref.text, 6000))
         ..writeln();
     }
-    return _clip(buf.toString(), 18000);
+    return clip(buf.toString(), 18000);
   }
 
   static String _renderHtmlDocument(DocumentDraft draft) {
@@ -1866,20 +1780,7 @@ pre { white-space: pre-wrap; word-break: break-word; line-height: 28pt; font-fam
         .replaceAll(RegExp(r'[\\/:*?"<>|]'), '_')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
-    return cleaned.isEmpty ? '未命名文档' : _clip(cleaned, 80);
+    return cleaned.isEmpty ? '未命名文档' : clip(cleaned, 80);
   }
 
-  static const _candidateBrowsers = [
-    r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe',
-    r'C:\Program Files\Microsoft\Edge\Application\msedge.exe',
-    r'C:\Program Files\Google\Chrome\Application\chrome.exe',
-    r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
-  ];
-
-  static String? _browserPath() {
-    for (final path in _candidateBrowsers) {
-      if (File(path).existsSync()) return path;
-    }
-    return null;
-  }
 }

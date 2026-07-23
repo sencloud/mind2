@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:pdfrx/pdfrx.dart';
 
+import '../util/text_util.dart';
 import 'agent/memory/memory_selector.dart';
 import 'agent/memory/memory_store.dart';
 import 'agent/memory/memory_types.dart';
@@ -419,9 +420,6 @@ class BookService extends ChangeNotifier {
   File? _store;
   String _baseDir = '';
 
-  /// 当前在途的 HTTP client：取消时直接关闭以中断请求（含非流式的长调用）。
-  http.Client? _client;
-
   /// 小模型通道（用通用默认模型）：供「按需回忆」相关设定的廉价选择题使用，
   /// 复用项目重构后的记忆基建（MemoryStore 结构化文件 + MemorySelector 小模型选择）。
   late final ModelClient _small = ModelClient(settings, small: true);
@@ -806,10 +804,6 @@ class BookService extends ChangeNotifier {
     if (busy) {
       _cancel = true;
       stage = '正在停止…';
-      // 关闭在途请求，立即中断「规划大纲 / 生成设定集 / 成文」等长调用。
-      try {
-        _client?.close();
-      } catch (_) {}
       notifyListeners();
     }
   }
@@ -1314,15 +1308,25 @@ class BookService extends ChangeNotifier {
     final base = replace ? '' : chapter.content;
     if (replace) chapter.content = '';
     var acc = '';
-    await for (final delta in _streamChat([
-      {'role': 'system', 'content': system},
-      {'role': 'user', 'content': user},
-    ])) {
-      if (_cancel) break;
-      acc += delta;
-      chapter.content = replace ? acc : '$base\n\n$acc';
-      notifyListeners();
-    }
+    await ModelClient(settings, role: ModelRole.writing).streamWithRetry(
+      messages: [
+        {'role': 'system', 'content': system},
+        {'role': 'user', 'content': user},
+      ],
+      onTextDelta: (delta) {
+        acc += delta;
+        chapter.content = replace ? acc : '$base\n\n$acc';
+        notifyListeners();
+      },
+      isCancelled: () => _cancel,
+      idleTimeout: const Duration(seconds: 90),
+      onAttempt: (attempt) {
+        acc = '';
+        chapter.content = replace ? '' : base;
+        stage = '网络中断，正在重试（${attempt - 1}/3）…';
+        notifyListeners();
+      },
+    );
     if (acc.trim().isEmpty && replace) stage = '模型未返回内容';
     _touch();
     await _persist();
@@ -1501,7 +1505,9 @@ ${ch.recap.isEmpty ? ch.summary : ch.recap}
     }
     final dir = Directory(p.join(settings.vaultPath, '4-书稿'));
     await dir.create(recursive: true);
-    final file = File(p.join(dir.path, '${_sanitize(book.title)}.md'));
+    final file = File(
+      p.join(dir.path, '${sanitizeFileName(book.title, fallback: '未命名书稿')}.md'),
+    );
     await file.writeAsString(buf.toString());
     return file.path;
   }
@@ -1903,17 +1909,13 @@ $tail
   void _end() {
     busy = false;
     _cancel = false;
-    _client = null;
     notifyListeners();
   }
 
+  /// 容错版 JSON 提取：复用 [ModelClient.parseJsonObject]，解析失败返回 null。
   Map<String, dynamic>? _parseJson(String reply) {
-    final start = reply.indexOf('{');
-    final end = reply.lastIndexOf('}');
-    if (start < 0 || end <= start) return null;
     try {
-      return jsonDecode(reply.substring(start, end + 1))
-          as Map<String, dynamic>;
+      return ModelClient.parseJsonObject(reply);
     } catch (_) {
       return null;
     }
@@ -1929,101 +1931,21 @@ $tail
         .toList();
   }
 
+  /// 写作类一次性调用：统一走 [ModelClient] 的 writing 角色通道。
   Future<String> _chat(
     List<Map<String, String>> messages, {
     bool jsonMode = false,
-  }) async {
-    // 写作类一次性调用走 writing 角色通道（默认仍是 DeepSeek，可在设置里改）。
-    const role = ModelRole.writing;
-    final client = _client = http.Client();
-    try {
-      final resp = await client.post(
-        Uri.parse('${settings.roleBaseUrl(role)}/chat/completions'),
-        headers: {
-          'Authorization': 'Bearer ${settings.roleApiKey(role)}',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'model': settings.roleModel(role),
-          'stream': false,
-          if (jsonMode) 'response_format': {'type': 'json_object'},
-          'messages': messages,
-        }),
-      );
-      if (resp.statusCode != 200) {
-        throw Exception(
-          'HTTP ${resp.statusCode} ${utf8.decode(resp.bodyBytes)}',
-        );
-      }
-      final j = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
-      return (j['choices']?[0]?['message']?['content'] as String?)?.trim() ??
-          '';
-    } finally {
-      client.close();
-      if (identical(_client, client)) _client = null;
-    }
-  }
-
-  Stream<String> _streamChat(List<Map<String, String>> messages) async* {
-    // 章节正文生成/续写走 writing 角色通道。
-    const role = ModelRole.writing;
-    final request = http.Request(
-      'POST',
-      Uri.parse('${settings.roleBaseUrl(role)}/chat/completions'),
+  }) {
+    return ModelClient(settings, role: ModelRole.writing).complete(
+      messages: messages,
+      jsonMode: jsonMode,
+      isCancelled: () => _cancel,
     );
-    request.headers['Authorization'] = 'Bearer ${settings.roleApiKey(role)}';
-    request.headers['Content-Type'] = 'application/json';
-    request.body = jsonEncode({
-      'model': settings.roleModel(role),
-      'messages': messages,
-      'stream': true,
-    });
-
-    final client = _client = http.Client();
-    try {
-      final response = await client.send(request);
-      if (response.statusCode != 200) {
-        final body = await response.stream.bytesToString();
-        throw Exception('HTTP ${response.statusCode} $body');
-      }
-
-      var buffer = '';
-      await for (final chunk in response.stream.transform(utf8.decoder)) {
-        if (_cancel) return;
-        buffer += chunk;
-        while (true) {
-          final newline = buffer.indexOf('\n');
-          if (newline < 0) break;
-          final line = buffer.substring(0, newline).trim();
-          buffer = buffer.substring(newline + 1);
-          if (!line.startsWith('data:')) continue;
-          final data = line.substring(5).trim();
-          if (data == '[DONE]') return;
-          try {
-            final json = jsonDecode(data) as Map<String, dynamic>;
-            final content =
-                json['choices']?[0]?['delta']?['content'] as String?;
-            if (content != null && content.isNotEmpty) yield content;
-          } catch (_) {
-            // 忽略无法解析的片段
-          }
-        }
-      }
-    } finally {
-      client.close();
-      if (identical(_client, client)) _client = null;
-    }
   }
 
-  static String _sanitize(String s) {
-    var out = s.replaceAll(RegExp(r'[\\/:*?"<>|]'), ' ').trim();
-    if (out.length > 80) out = out.substring(0, 80).trim();
-    return out.isEmpty ? '未命名书稿' : out;
-  }
-
-  static String _clipText(String text, int maxChars) {
-    final trimmed = text.trim();
-    if (trimmed.length <= maxChars) return trimmed;
-    return '${trimmed.substring(0, maxChars).trim()}\n\n（已截断，仅保留前 $maxChars 字用于分析。）';
-  }
+  static String _clipText(String text, int maxChars) => clip(
+        text.trim(),
+        maxChars,
+        suffix: '\n\n（已截断，仅保留前 $maxChars 字用于分析。）',
+      );
 }

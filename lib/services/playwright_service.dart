@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../util/text_util.dart';
 import 'settings_service.dart';
 import 'source_adapters.dart';
 
@@ -544,10 +545,8 @@ class PlaywrightService extends ChangeNotifier {
     }
   }
 
-  static String _clip(String s, [int max = 600]) {
-    final one = s.replaceAll(RegExp(r'\s+'), ' ').trim();
-    return one.length > max ? '${one.substring(0, max)}…' : one;
-  }
+  static String _clip(String s, [int max = 600]) =>
+      clip(s.replaceAll(RegExp(r'\s+'), ' ').trim(), max, suffix: '…');
 
   /// 把网页渲染后保存为 PDF，成功返回 PDF 字节。
   Future<Uint8List?> pagePdf(String url) async {

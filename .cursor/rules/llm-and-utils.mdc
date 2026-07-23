@@ -1,0 +1,54 @@
+---
+description: 复用统一的 LLM 客户端与公共工具，禁止在各 service 里重造轮子
+globs: lib/**/*.dart
+alwaysApply: true
+---
+
+# LLM 调用与公共工具的复用约定
+
+新增功能时**必须复用**现有基础设施，不要每个 service 各写一套 HTTP / JSON / 字符串工具。
+
+## LLM 调用一律走 ModelClient
+
+`lib/services/agent/model_client.dart` 是唯一的模型接入点，已封装超时、错误处理、SSE 流式、Function Calling、JSON 模式、断线重试与角色路由。
+
+- 一次性补全：`ModelClient(settings, role: ModelRole.xxx).complete(...)`
+- 需要 JSON：`completeJson(...)`（内部 `complete(jsonMode:true)` + `parseJsonObject`）
+- 流式逐字：`stream(messages:..., onTextDelta:..., isCancelled:...)`
+- 长流式怕断线：`streamWithRetry(...)`（自带瞬时网络重试 + `idleTimeout`）
+
+禁止在 service 里自己 `http.post('.../chat/completions')`、手写 SSE 解析、或写 `_chat`/`_streamChat`/`_isTransientNetworkError`。
+
+```dart
+// BAD：自建 HTTP + SSE
+final resp = await http.Client().post(Uri.parse('$base/chat/completions'), ...);
+
+// GOOD
+final text = await ModelClient(settings, role: ModelRole.writing).complete(messages: msgs);
+```
+
+## JSON 提取用 ModelClient.parseJsonObject
+
+从模型回复里取 JSON 对象一律用 `ModelClient.parseJsonObject(reply)`（已处理 ```json 围栏、最外层 `{...}`、尾随逗号）。需要容错返回 null 时用 `try/catch` 包一层，不要重写提取逻辑。
+
+## 文本裁剪 / 文件名清洗用 lib/util/text_util.dart
+
+- 截断：`clip(s, max, {suffix})`——需省略号传 `suffix: '…'`，需提示传对应 suffix。
+- 文件名：`sanitizeFileName(s, {maxLen, fallback})`。
+
+禁止再写 `s.length <= max ? s : s.substring(0, max)` 这类私有 `_clip`/`_sanitize`。确需附加行为（如先折叠空白）时，写一行 delegate 到 `clip`/`sanitizeFileName`，不要复制其实现。
+
+## 模型路由
+
+按任务选 `ModelRole`（chat/writing/research/agent/small/vision），供应商由 `SettingsService.roleProviderKey` 决定；除 `chat` 与 `small` 外默认跟随「实验/项目大模型」。不要在 service 里硬编码 baseUrl/model。
+
+## 无头浏览器（高清图 / PDF / 渲染 DOM）用 HeadlessBrowser
+
+`lib/services/headless_browser.dart` 是唯一的 Edge/Chrome 无头浏览器入口，已封装浏览器探测、临时目录管理与进程参数。
+
+- 生成**高清 PNG**：`HeadlessBrowser.capturePng(html)`——默认 4x 设备像素、`pngViewportW×pngViewportH` 视口；返回原始截图字节，是否裁白边由调用方决定。需要换算物理尺寸时用 `HeadlessBrowser.pngScale`。
+- HTML→PDF：`HeadlessBrowser.printPdf(htmlFile, outFile)`（传已落盘的 `File`，以保留相对资源引用）。
+- 渲染后 DOM：`HeadlessBrowser.renderDom(url)`。
+- 能力探测：`HeadlessBrowser.available` / `HeadlessBrowser.path()`。
+
+禁止再在 service 里复制候选浏览器路径列表、自写 `_browserPath()`，或手拼 `--headless=new --screenshot/--print-to-pdf/--dump-dom` 的 `Process.run`。要新的高清参数时改 `HeadlessBrowser`，让所有功能统一受益。

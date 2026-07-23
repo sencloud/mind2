@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../../../util/text_util.dart';
 import '../model_client.dart';
 
 /// 一条会话归档的头信息。
@@ -74,13 +75,9 @@ class SessionArchive {
       ],
       jsonMode: true,
     );
-    Map<String, dynamic>? obj;
+    Map<String, dynamic> obj;
     try {
-      final raw = turn.content;
-      final start = raw.indexOf('{');
-      final end = raw.lastIndexOf('}');
-      if (start < 0 || end <= start) return;
-      obj = jsonDecode(raw.substring(start, end + 1)) as Map<String, dynamic>;
+      obj = ModelClient.parseJsonObject(turn.content);
     } catch (_) {
       return;
     }
@@ -249,5 +246,5 @@ class SessionArchive {
   }
 
   static String _clip(String s, int max) =>
-      s.length <= max ? s : '${s.substring(0, max)}\n…（已截断）';
+      clip(s, max, suffix: '\n…（已截断）');
 }

@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import '../models.dart';
+import '../util/text_util.dart';
 import 'agent/memory/memory_service.dart';
 import 'agent/model_client.dart';
 import 'project_context_builder.dart';
@@ -2832,10 +2833,8 @@ $body''';
       .replaceAll('"', '&quot;')
       .replaceAll("'", '&#39;');
 
-  static String _clipForPrompt(String s, int max) {
-    final one = s.replaceAll(RegExp(r'\s+'), ' ').trim();
-    return one.length <= max ? one : '${one.substring(0, max)}…';
-  }
+  static String _clipForPrompt(String s, int max) =>
+      clip(s.replaceAll(RegExp(r'\s+'), ' ').trim(), max, suffix: '…');
 
   // ---------- 下载与校验 ----------
 
@@ -3018,11 +3017,7 @@ $body''';
     return head.startsWith('<!doctype') || head.startsWith('<html');
   }
 
-  static String _sanitize(String s) {
-    var out = s.replaceAll(RegExp(r'[\\/:*?"<>|]'), ' ').trim();
-    if (out.length > 80) out = out.substring(0, 80).trim();
-    return out.isEmpty ? '未命名' : out;
-  }
+  static String _sanitize(String s) => sanitizeFileName(s);
 
   static String _cleanResearchTitle(String s) {
     var out = s
@@ -3038,25 +3033,8 @@ $body''';
   /// FormatException。这里先剥离围栏、截取最外层 {...}、去掉尾随逗号再解析；
   /// 解析不出对象时返回 null，由调用方决定默认行为。
   Map<String, dynamic>? _parseJsonObject(String raw) {
-    var t = raw.trim();
-    if (t.startsWith('```')) {
-      t = t
-          .replaceFirst(RegExp(r'^```[a-zA-Z]*\s*'), '')
-          .replaceFirst(RegExp(r'\s*```$'), '')
-          .trim();
-    }
-    final start = t.indexOf('{');
-    final end = t.lastIndexOf('}');
-    if (start < 0 || end <= start) return null;
-    // 去掉对象/数组结尾多余的逗号。注意 Dart 的 replaceAll 不解释 $1 反向引用，
-    // 必须用 replaceAllMapped 才能保留其后的 } 或 ]。
-    t = t.substring(start, end + 1).replaceAllMapped(
-          RegExp(r',(\s*[}\]])'),
-          (m) => m.group(1)!,
-        );
     try {
-      final v = jsonDecode(t);
-      return v is Map ? Map<String, dynamic>.from(v) : null;
+      return ModelClient.parseJsonObject(raw);
     } catch (_) {
       return null;
     }

@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../util/text_util.dart';
 import 'agent/agent_event.dart';
 import 'agent/agent_loop.dart';
 import 'agent/agent_runner.dart';
@@ -722,5 +723,5 @@ class ProjectService extends ChangeNotifier {
   }
 
   static String _clip(String s, int max) =>
-      s.length <= max ? s : '${s.substring(0, max)}\n…（已截断 ${s.length - max} 字）';
+      clip(s, max, suffix: '\n…（已截断 ${s.length - max} 字）');
 }

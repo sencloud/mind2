@@ -10,6 +10,7 @@ import 'services/agent/memory/memory_service.dart';
 import 'services/book_service.dart';
 import 'services/chat_service.dart';
 import 'services/document_service.dart';
+import 'services/drawing_service.dart';
 import 'services/experiment_service.dart';
 import 'services/file_library_service.dart';
 import 'services/library_service.dart';
@@ -25,6 +26,7 @@ import 'services/promo_service.dart';
 import 'services/settings_service.dart';
 import 'services/system_proxy.dart';
 import 'services/topic_service.dart';
+import 'services/video_service.dart';
 import 'services/zotero_service.dart';
 import 'ui/app_shell.dart';
 import 'ui/mobile_app_shell.dart';
@@ -84,6 +86,10 @@ Future<void> main() async {
   final book = BookService(settings);
   final paper = PaperService(settings, project: project, docs: projectDoc);
   final promo = PromoService(settings, project: project, memory: memory);
+  // 「画图」：据关联工程生成漂亮完整的架构图（复用文档服务的 Mermaid 渲染）。
+  final drawing = DrawingService(settings, project: project, document: document);
+  // 「视频」：据创意生成分镜脚本。
+  final video = VideoService(settings);
   // 「计划」：每日待办 + AI 分析并执行（复用统一 Agent 内核）。
   final plan = PlanService(settings, memory, research: topic);
   await chat.init();
@@ -103,6 +109,8 @@ Future<void> main() async {
   await book.init();
   await paper.init();
   await promo.init();
+  await drawing.init();
+  await video.init();
   await plan.init();
   unawaited(library.reload());
   unawaited(fileLibrary.reload());
@@ -125,6 +133,8 @@ Future<void> main() async {
       book: book,
       paper: paper,
       promo: promo,
+      drawing: drawing,
+      video: video,
       plan: plan,
     ),
   );
@@ -165,6 +175,8 @@ class MindApp extends StatelessWidget {
     required this.book,
     required this.paper,
     required this.promo,
+    required this.drawing,
+    required this.video,
     required this.plan,
   });
 
@@ -185,6 +197,8 @@ class MindApp extends StatelessWidget {
   final BookService book;
   final PaperService paper;
   final PromoService promo;
+  final DrawingService drawing;
+  final VideoService video;
   final PlanService plan;
 
   @override
@@ -243,6 +257,8 @@ class MindApp extends StatelessWidget {
               book: book,
               paper: paper,
               promo: promo,
+              drawing: drawing,
+              video: video,
               plan: plan,
             ),
     );

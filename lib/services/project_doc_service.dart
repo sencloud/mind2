@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../util/text_util.dart';
 import 'agent/agent_loop.dart';
 import 'agent/agent_runner.dart';
 import 'agent/memory/memory_service.dart';
@@ -959,16 +960,7 @@ ${_clip(analysis, 14000)}
 
   Map<String, dynamic>? _parseArchJson(String content) {
     try {
-      var s = content.trim();
-      if (s.startsWith('```')) {
-        s = s.replaceFirst(RegExp(r'^```[a-zA-Z]*\s*'), '');
-        if (s.endsWith('```')) s = s.substring(0, s.length - 3);
-      }
-      final start = s.indexOf('{');
-      final end = s.lastIndexOf('}');
-      if (start < 0 || end <= start) return null;
-      final data = jsonDecode(s.substring(start, end + 1));
-      return data is Map ? data.cast<String, dynamic>() : null;
+      return ModelClient.parseJsonObject(content);
     } catch (_) {
       return null;
     }
@@ -1769,5 +1761,5 @@ ${codeBlock.trim().isEmpty ? '' : '【相关真实代码片段（与本文档最
   }
 
   static String _clip(String s, int max) =>
-      s.length <= max ? s : '${s.substring(0, max)}\n…（已截断）';
+      clip(s, max, suffix: '\n…（已截断）');
 }

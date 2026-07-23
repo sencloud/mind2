@@ -1,8 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:http/http.dart' as http;
+
+import 'headless_browser.dart';
 
 /// 固定可靠源站标识。
 enum SourceId {
@@ -647,54 +648,10 @@ class HeadlessWebAdapter extends SourceAdapter {
   @override
   SourceId get sourceId => SourceId.web;
 
-  static const _candidatePaths = [
-    r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe',
-    r'C:\Program Files\Microsoft\Edge\Application\msedge.exe',
-    r'C:\Program Files\Google\Chrome\Application\chrome.exe',
-    r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
-  ];
-
-  static String? _browserPath() {
-    for (final p in _candidatePaths) {
-      if (File(p).existsSync()) return p;
-    }
-    return null;
-  }
-
-  static bool get available => _browserPath() != null;
+  static bool get available => HeadlessBrowser.available;
 
   /// 用无头浏览器渲染页面并返回 DOM HTML。
-  static Future<String?> renderDom(String url) async {
-    final browser = _browserPath();
-    if (browser == null) return null;
-    final tmp = Directory.systemTemp.createTempSync('mind_hl');
-    try {
-      final result = await Process.run(
-        browser,
-        [
-          '--headless=new',
-          '--disable-gpu',
-          '--no-sandbox',
-          '--disable-dev-shm-usage',
-          '--user-data-dir=${tmp.path}',
-          '--virtual-time-budget=12000',
-          '--run-all-compositor-stages-before-draw',
-          '--dump-dom',
-          url,
-        ],
-        stdoutEncoding: utf8,
-        stderrEncoding: utf8,
-      ).timeout(const Duration(seconds: 50));
-      final out = result.stdout as String? ?? '';
-      return out.isEmpty ? null : out;
-    } catch (_) {
-      return null;
-    } finally {
-      try {
-        tmp.deleteSync(recursive: true);
-      } catch (_) {}
-    }
-  }
+  static Future<String?> renderDom(String url) => HeadlessBrowser.renderDom(url);
 
   static String decodeBingRedirect(String href) {
     final m = RegExp(r'[?&]u=a1([A-Za-z0-9_-]+)').firstMatch(href);

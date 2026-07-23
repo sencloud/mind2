@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import '../../util/text_util.dart';
 import 'agent_loop.dart';
 import 'compaction.dart';
 import 'memory/memory_service.dart';
@@ -225,6 +226,5 @@ class AgentRunner {
     return buf.toString();
   }
 
-  static String _clip(String s, int max) =>
-      s.length <= max ? s : '${s.substring(0, max)}…';
+  static String _clip(String s, int max) => clip(s, max, suffix: '…');
 }

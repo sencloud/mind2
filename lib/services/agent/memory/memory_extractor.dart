@@ -1,5 +1,4 @@
-import 'dart:convert';
-
+import '../../../util/text_util.dart';
 import '../model_client.dart';
 import 'memory_types.dart';
 
@@ -58,12 +57,9 @@ class MemoryExtractor {
 
   List<ExtractedMemory> _parse(String raw) {
     final out = <ExtractedMemory>[];
-    Map<String, dynamic>? obj;
+    Map<String, dynamic> obj;
     try {
-      final start = raw.indexOf('{');
-      final end = raw.lastIndexOf('}');
-      if (start < 0 || end <= start) return out;
-      obj = jsonDecode(raw.substring(start, end + 1)) as Map<String, dynamic>;
+      obj = ModelClient.parseJsonObject(raw);
     } catch (_) {
       return out;
     }
@@ -90,5 +86,5 @@ class MemoryExtractor {
   }
 
   static String _clip(String s, int max) =>
-      s.length <= max ? s : '${s.substring(0, max)}\n…（已截断 ${s.length - max} 字）';
+      clip(s, max, suffix: '\n…（已截断 ${s.length - max} 字）');
 }

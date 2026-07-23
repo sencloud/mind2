@@ -16,6 +16,7 @@ import '../services/graph_service.dart';
 import '../services/library_service.dart';
 import '../services/paper_service.dart';
 import '../services/platform_capabilities.dart';
+import '../util/text_util.dart';
 import 'preview/file_preview.dart';
 
 const statusOptions = ['未读', '在读', '已读'];
@@ -346,11 +347,8 @@ class _LibraryPageState extends State<LibraryPage> {
     return out.isEmpty ? '未命名' : out;
   }
 
-  static String _clipContext(String s, int maxLen) {
-    final clean = s.replaceAll(RegExp(r'\s+'), ' ').trim();
-    if (clean.length <= maxLen) return clean;
-    return '${clean.substring(0, maxLen)}…';
-  }
+  static String _clipContext(String s, int maxLen) =>
+      clip(s.replaceAll(RegExp(r'\s+'), ' ').trim(), maxLen, suffix: '…');
 
   /// 弹出文本编辑框，返回用户确认的文本（取消返回 null）。
   Future<String?> _promptText({

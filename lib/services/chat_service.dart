@@ -3,11 +3,11 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
 import '../models.dart';
 import 'agent/memory/memory_service.dart';
+import 'agent/model_client.dart';
 import 'settings_service.dart';
 import 'web_reader.dart';
 
@@ -165,45 +165,24 @@ class ChatService extends ChangeNotifier {
     }
   }
 
-  Stream<String> _stream(List<Map<String, String>> messages) async* {
-    // 聊天走 chat 角色通道（默认仍是 DeepSeek，可在设置里改用其它模型）。
-    const role = ModelRole.chat;
-    final request = http.Request('POST',
-        Uri.parse('${settings.roleBaseUrl(role)}/chat/completions'));
-    request.headers['Authorization'] = 'Bearer ${settings.roleApiKey(role)}';
-    request.headers['Content-Type'] = 'application/json';
-    request.body = jsonEncode({
-      'model': settings.roleModel(role),
-      'messages': messages,
-      'stream': true,
-    });
-
-    final response = await http.Client().send(request);
-    if (response.statusCode != 200) {
-      final body = await response.stream.bytesToString();
-      throw Exception('HTTP ${response.statusCode} $body');
-    }
-
-    var buffer = '';
-    await for (final chunk in response.stream.transform(utf8.decoder)) {
-      buffer += chunk;
-      while (true) {
-        final newline = buffer.indexOf('\n');
-        if (newline < 0) break;
-        final line = buffer.substring(0, newline).trim();
-        buffer = buffer.substring(newline + 1);
-        if (!line.startsWith('data:')) continue;
-        final data = line.substring(5).trim();
-        if (data == '[DONE]') return;
-        try {
-          final json = jsonDecode(data) as Map<String, dynamic>;
-          final content =
-              json['choices']?[0]?['delta']?['content'] as String?;
-          if (content != null && content.isNotEmpty) yield content;
-        } catch (_) {
-          // 忽略无法解析的片段
-        }
+  /// 聊天走 chat 角色通道：统一由 [ModelClient] 处理 SSE，本方法只把文本增量
+  /// 转成 `Stream<String>` 供 UI 逐字消费。
+  Stream<String> _stream(List<Map<String, String>> messages) {
+    final controller = StreamController<String>();
+    () async {
+      try {
+        await ModelClient(settings, role: ModelRole.chat).stream(
+          messages: messages,
+          onTextDelta: (delta) {
+            if (!controller.isClosed) controller.add(delta);
+          },
+        );
+      } catch (e) {
+        if (!controller.isClosed) controller.addError(e);
+      } finally {
+        await controller.close();
       }
-    }
+    }();
+    return controller.stream;
   }
 }

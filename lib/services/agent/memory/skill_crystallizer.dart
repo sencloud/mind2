@@ -1,5 +1,4 @@
-import 'dart:convert';
-
+import '../../../util/text_util.dart';
 import '../model_client.dart';
 
 /// 沉淀出的一条候选技能（SOP）。
@@ -90,12 +89,9 @@ SOP 正文（body）结构要求，用 Markdown：
   }
 
   CrystallizedSkill? _parse(String raw) {
-    Map<String, dynamic>? obj;
+    Map<String, dynamic> obj;
     try {
-      final start = raw.indexOf('{');
-      final end = raw.lastIndexOf('}');
-      if (start < 0 || end <= start) return null;
-      obj = jsonDecode(raw.substring(start, end + 1)) as Map<String, dynamic>;
+      obj = ModelClient.parseJsonObject(raw);
     } catch (_) {
       return null;
     }
@@ -115,5 +111,5 @@ SOP 正文（body）结构要求，用 Markdown：
   }
 
   static String _clip(String s, int max) =>
-      s.length <= max ? s : '${s.substring(0, max)}\n…（已截断）';
+      clip(s, max, suffix: '\n…（已截断）');
 }

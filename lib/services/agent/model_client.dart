@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
+import '../../util/text_util.dart';
 import '../settings_service.dart';
 import 'messages.dart';
 
@@ -59,6 +61,26 @@ class ModelClient {
     return turn.content.trim();
   }
 
+  /// 一次性补全并解析为 JSON 对象：内部走 `complete(jsonMode: true)` 后调
+  /// [parseJsonObject]，统一了各 service 里「补全 + 提取 JSON」的重复逻辑。
+  Future<Map<String, dynamic>> completeJson({
+    String? system,
+    String? user,
+    List<Map<String, dynamic>>? messages,
+    bool Function()? isCancelled,
+    Duration timeout = const Duration(minutes: 3),
+  }) async {
+    final reply = await complete(
+      system: system,
+      user: user,
+      messages: messages,
+      jsonMode: true,
+      isCancelled: isCancelled,
+      timeout: timeout,
+    );
+    return parseJsonObject(reply);
+  }
+
   /// 流式发起一轮对话。
   /// - [messages]：完整消息数组（API 形态）。
   /// - [tools]：工具的 JSON Schema 列表（为空则不带 tools）。
@@ -75,6 +97,7 @@ class ModelClient {
     bool Function()? isCancelled,
     bool jsonMode = false,
     Duration timeout = const Duration(minutes: 5),
+    Duration? idleTimeout,
   }) async {
     final uri = Uri.parse('$_baseUrl/chat/completions');
     final body = <String, dynamic>{
@@ -99,7 +122,7 @@ class ModelClient {
       final resp = await client.send(req).timeout(timeout);
       if (resp.statusCode != 200) {
         final text = await resp.stream.bytesToString();
-        throw Exception('HTTP ${resp.statusCode}: ${_clip(text, 400)}');
+        throw Exception('HTTP ${resp.statusCode}: ${clip(text, 400, suffix: '…')}');
       }
 
       final buf = _ToolCallAccumulator(onToolCallStart);
@@ -107,9 +130,11 @@ class ModelClient {
       final reasoning = StringBuffer();
       String? finishReason;
 
-      final lines = resp.stream
+      var lines = resp.stream
           .transform(const Utf8Decoder(allowMalformed: true))
           .transform(const LineSplitter());
+      // 空闲超时：若长时间没有新分片流入，判定连接假死并抛出，交由上层重试。
+      if (idleTimeout != null) lines = lines.timeout(idleTimeout);
 
       await for (final line in lines) {
         if (isCancelled?.call() ?? false) break;
@@ -156,8 +181,87 @@ class ModelClient {
     }
   }
 
-  static String _clip(String s, int max) =>
-      s.length <= max ? s : '${s.substring(0, max)}…';
+  /// 带「瞬时网络断线重试」的流式补全：长流式响应常被服务端/中间代理中途断开，
+  /// 这里对可重试的网络错误做有限次数重试（用户主动取消或非网络类错误不重试）。
+  /// 每次重试前回调 [onAttempt]，让调用方清空上一轮已累计的文本再重写。
+  Future<AssistantTurn> streamWithRetry({
+    required List<Map<String, dynamic>> messages,
+    void Function(String delta)? onTextDelta,
+    bool Function()? isCancelled,
+    int maxAttempts = 3,
+    Duration? idleTimeout,
+    Duration timeout = const Duration(minutes: 5),
+    void Function(int attempt)? onAttempt,
+  }) async {
+    Object? lastError;
+    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (isCancelled?.call() ?? false) break;
+      if (attempt > 1) onAttempt?.call(attempt);
+      try {
+        return await stream(
+          messages: messages,
+          onTextDelta: onTextDelta,
+          isCancelled: isCancelled,
+          idleTimeout: idleTimeout,
+          timeout: timeout,
+        );
+      } catch (e) {
+        lastError = e;
+        if ((isCancelled?.call() ?? false) || !isTransientNetworkError(e)) {
+          rethrow;
+        }
+        await Future.delayed(Duration(seconds: attempt * 2));
+      }
+    }
+    if (isCancelled?.call() ?? false) {
+      return AssistantTurn(finishReason: 'cancelled');
+    }
+    throw Exception('连续 $maxAttempts 次因网络中断失败：$lastError');
+  }
+
+  /// 从模型回复里稳健地提取一个 JSON 对象：先剥 ```json 围栏，再取首个 `{`
+  /// 到最后一个 `}` 之间的片段解析。统一取代各 service 里自写的 `_parseJson`。
+  static Map<String, dynamic> parseJsonObject(String reply) {
+    var t = reply.trim();
+    if (t.startsWith('```')) {
+      t = t.replaceFirst(RegExp(r'^```[a-zA-Z]*\s*'), '');
+      final fence = t.lastIndexOf('```');
+      if (fence >= 0) t = t.substring(0, fence);
+      t = t.trim();
+    }
+    final start = t.indexOf('{');
+    final end = t.lastIndexOf('}');
+    if (start < 0 || end <= start) throw Exception('模型未返回 JSON');
+    final body = t.substring(start, end + 1);
+    try {
+      return jsonDecode(body) as Map<String, dynamic>;
+    } on FormatException {
+      // 仅当严格解析失败时，才容忍「对象/数组结尾多余逗号」这类常见非法 JSON：
+      // 去掉尾随逗号后重试，避免误伤字符串值里合法出现的 `, }` / `, ]`。
+      // 注意 replaceAll 不解释 $1 反向引用，必须用 replaceAllMapped。
+      final relaxed = body.replaceAllMapped(
+        RegExp(r',(\s*[}\]])'),
+        (m) => m.group(1)!,
+      );
+      return jsonDecode(relaxed) as Map<String, dynamic>;
+    }
+  }
+
+  /// 判断是否为可重试的瞬时网络错误（连接被断开 / 超时等），而非模型/参数错误。
+  static bool isTransientNetworkError(Object e) {
+    if (e is SocketException || e is TimeoutException) return true;
+    if (e is http.ClientException) return true;
+    final s = e.toString().toLowerCase();
+    return s.contains('connection closed') ||
+        s.contains('connection reset') ||
+        s.contains('connection terminated') ||
+        s.contains('connection refused') ||
+        s.contains('broken pipe') ||
+        s.contains('timed out') ||
+        s.contains('timeout') ||
+        s.contains('httpexception') ||
+        s.contains('clientexception');
+  }
 }
 
 /// 累积流式 tool_calls 分片（按 index 聚合 id/name/arguments）。

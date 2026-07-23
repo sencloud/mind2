@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../util/text_util.dart';
 import 'agent/agent_runner.dart';
 import 'agent/memory/memory_service.dart';
 import 'agent/messages.dart';
@@ -286,21 +287,21 @@ class PromoService extends ChangeNotifier {
         onStatus: (m) {
           final t = m.trim();
           if (t.isEmpty) return;
-          stage = _clip(t, 80);
+          stage = clip(t, 80);
           _log('status', t);
         },
         onAssistantText: (full) {
           final t = full.trim();
-          if (t.isNotEmpty) _log('thought', _clip(t, 400));
+          if (t.isNotEmpty) _log('thought', clip(t, 400));
         },
         onToolStart: (id, tool, title) {
           final t = title.trim().isEmpty ? tool : title.trim();
-          stage = _clip(t, 80);
+          stage = clip(t, 80);
           _log('tool', t);
         },
         onToolEnd: (id, isError, result) {
           _log('result',
-              isError ? '失败：${_clip(result.trim(), 200)}' : _oneLine(result));
+              isError ? '失败：${clip(result.trim(), 200)}' : _oneLine(result));
         },
       );
       final result = await _runner!.run(
@@ -344,7 +345,7 @@ class PromoService extends ChangeNotifier {
   static String _oneLine(String s) {
     final flat = s.replaceAll(RegExp(r'\s+'), ' ').trim();
     if (flat.isEmpty) return '完成';
-    return _clip(flat, 160);
+    return clip(flat, 160);
   }
 
   static const _walkSystem = '''
@@ -391,7 +392,7 @@ ${draft.appIntro.trim().isEmpty ? '' : '已有简介：${draft.appIntro.trim()}\
         },
         {'role': 'user', 'content': _titlePrompt(draft)},
       ], jsonMode: true);
-      final j = _parseJson(reply);
+      final j = ModelClient.parseJsonObject(reply);
       final raw = (j['titles'] as List?) ?? [];
       final titles = raw
           .map((e) => e.toString().trim())
@@ -504,7 +505,7 @@ ${draft.appIntro.trim().isEmpty ? '' : '已有简介：${draft.appIntro.trim()}\
         ..writeln()
         ..writeln()
         ..writeln('【工程源码走读要点（基于真实代码提炼，务必据此写作，让内容接地气、准确，不要臆造）】')
-        ..write(_clip(draft.projectBrief.trim(), 6000));
+        ..write(clip(draft.projectBrief.trim(), 6000));
     }
     return buf.toString();
   }
@@ -603,19 +604,6 @@ ${_appBlock(draft)}
     return controller.stream;
   }
 
-  Map<String, dynamic> _parseJson(String reply) {
-    final start = reply.indexOf('{');
-    final end = reply.lastIndexOf('}');
-    if (start < 0 || end <= start) throw Exception('模型未返回 JSON');
-    return jsonDecode(reply.substring(start, end + 1)) as Map<String, dynamic>;
-  }
-
-  static String _clip(String value, int max) =>
-      value.length <= max ? value : value.substring(0, max);
-
-  static String _sanitize(String value) {
-    var out = value.replaceAll(RegExp(r'[\\/:*?"<>|]'), ' ').trim();
-    if (out.length > 80) out = out.substring(0, 80).trim();
-    return out.isEmpty ? '知乎推文' : out;
-  }
+  static String _sanitize(String value) =>
+      sanitizeFileName(value, fallback: '知乎推文');
 }

@@ -323,8 +323,8 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   /// 「各功能使用的模型」：为每类任务单独挑选供应商。
-  /// 选「默认」即沿用推荐映射（Agent 跟随上面的实验大模型，其余走 DeepSeek），
-  /// 不配置时行为与以前完全一致。改动即时保存。
+  /// 选「默认」即沿用推荐映射（除「聊天」与「轻量任务」外均跟随上面的实验/项目大模型，
+  /// 聊天与轻量任务走 DeepSeek）。改动即时保存。
   Widget _buildRoleModelCard() {
     const roles = <(ModelRole, String, String)>[
       (ModelRole.chat, '聊天', '日常对话回复'),
@@ -351,7 +351,8 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 4),
           const Text(
             '可为不同任务分别指定模型，例如写作用更强的模型、轻量任务用便宜模型。'
-            '选「默认」即沿用推荐：实验/项目/计划跟随上面的大模型，其余走 DeepSeek。',
+            '选「默认」即沿用推荐：除「聊天」与「轻量任务」外均跟随上面的实验/项目大模型，'
+            '聊天与轻量任务走 DeepSeek。',
             style: TextStyle(fontSize: 12, color: Color(0xFF8B8B90)),
           ),
           const SizedBox(height: 8),

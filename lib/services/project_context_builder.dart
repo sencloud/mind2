@@ -1,9 +1,9 @@
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
+import '../util/text_util.dart';
 import 'agent/model_client.dart';
 import 'agent/tools/fs_helper.dart';
 import 'code_index_service.dart';
@@ -405,19 +405,11 @@ $hitsBlock
 
   bool _isCjk(String s) => RegExp(r'[\u4e00-\u9fa5]').hasMatch(s);
 
-  String _clip(String s, int max) =>
-      s.length <= max ? s : '${s.substring(0, max)}…';
+  String _clip(String s, int max) => clip(s, max, suffix: '…');
 
   Map<String, dynamic>? _parseJsonObject(String content) {
-    var t = content.trim();
-    final fence = RegExp(r'```(?:json)?\s*([\s\S]*?)```').firstMatch(t);
-    if (fence != null) t = fence.group(1)!.trim();
-    final start = t.indexOf('{');
-    final end = t.lastIndexOf('}');
-    if (start < 0 || end <= start) return null;
     try {
-      final obj = jsonDecode(t.substring(start, end + 1));
-      return obj is Map<String, dynamic> ? obj : null;
+      return ModelClient.parseJsonObject(content);
     } catch (_) {
       return null;
     }

@@ -184,16 +184,16 @@ class SettingsService extends ChangeNotifier {
   // ---------------------------------------------------------------------------
 
   /// 角色 → 供应商 key。用户在设置里为某角色单独指定时优先用其选择；
-  /// 否则用默认映射：agent 跟随「实验/项目大模型」，其余角色走默认 DeepSeek。
-  /// 这样在用户未做任何配置时，行为与改造前完全一致。
+  /// 否则用默认映射：除 chat（新建会话）与 small（记忆抽取等廉价高频任务）外，
+  /// 其余角色（writing/research/agent/vision）默认跟随「实验/项目大模型」
+  /// （可在设置里设为 GLM 等编程模型）。因 [experimentProvider] 未配置时本就等于
+  /// DeepSeek，用户未选其它模型时行为不变。
   String roleProviderKey(ModelRole role) {
     final saved = (_prefs.getString('role_${role.name}_provider') ?? '').trim();
     if (saved.isNotEmpty) return saved;
-    // agent 与 vision（读图/网页截图判断）默认跟随「实验/项目大模型」，
-    // 其余角色走默认 DeepSeek。用户可在设置里为任一角色单独覆盖。
-    return (role == ModelRole.agent || role == ModelRole.vision)
-        ? experimentProvider
-        : 'deepseek';
+    return (role == ModelRole.chat || role == ModelRole.small)
+        ? 'deepseek'
+        : experimentProvider;
   }
 
   /// 该角色用户显式指定的供应商 key；为空表示沿用默认映射（供设置页展示）。

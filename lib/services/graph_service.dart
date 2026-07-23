@@ -1,4 +1,5 @@
 import '../models.dart';
+import '../util/text_util.dart';
 
 enum GraphNodeType { note, category, tag }
 
@@ -290,7 +291,7 @@ class GraphBuilder {
         if (node.note == null)
           node.label.toLowerCase()
         else
-          '${node.note!.fullTitle} ${node.note!.standardNo} ${node.note!.tags.join(' ')} ${_clipSearchBody(node.note!.body)}'
+          '${node.note!.fullTitle} ${node.note!.standardNo} ${node.note!.tags.join(' ')} ${clip(node.note!.body, 12000)}'
               .toLowerCase(),
     ];
 
@@ -314,6 +315,4 @@ class GraphBuilder {
     return false;
   }
 
-  static String _clipSearchBody(String body) =>
-      body.length > 12000 ? body.substring(0, 12000) : body;
 }

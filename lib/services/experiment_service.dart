@@ -294,12 +294,10 @@ class ExperimentService extends ChangeNotifier {
   // 工具方法
   // ---------------------------------------------------------------------------
 
+  /// 容错版 JSON 提取：复用 [ModelClient.parseJsonObject]，解析失败返回 null。
   Map<String, dynamic>? _parseJson(String reply) {
-    final start = reply.indexOf('{');
-    final end = reply.lastIndexOf('}');
-    if (start < 0 || end <= start) return null;
     try {
-      return jsonDecode(reply.substring(start, end + 1)) as Map<String, dynamic>;
+      return ModelClient.parseJsonObject(reply);
     } catch (_) {
       return null;
     }

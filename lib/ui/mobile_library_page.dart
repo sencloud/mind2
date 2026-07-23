@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models.dart';
 import '../services/file_library_service.dart';
 import '../services/library_service.dart';
+import '../util/text_util.dart';
 
 class MobileLibraryPage extends StatefulWidget {
   const MobileLibraryPage({
@@ -478,9 +479,6 @@ ${_clip(note.body, 10000)}
     return out.isEmpty ? '未命名' : out;
   }
 
-  static String _clip(String s, int maxLen) {
-    final clean = s.replaceAll(RegExp(r'\s+'), ' ').trim();
-    if (clean.length <= maxLen) return clean;
-    return '${clean.substring(0, maxLen)}…';
-  }
+  static String _clip(String s, int maxLen) =>
+      clip(s.replaceAll(RegExp(r'\s+'), ' ').trim(), maxLen, suffix: '…');
 }

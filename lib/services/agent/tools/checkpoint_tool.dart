@@ -1,3 +1,4 @@
+import '../../../util/text_util.dart';
 import '../tool.dart';
 
 /// 工作记事板工具（对应 GenericAgent 的 working checkpoint）：
@@ -42,8 +43,7 @@ class CheckpointTool extends AgentTool {
     final content = (input['content'] ?? '').toString().trim();
     // 限制长度：记事板是备忘不是仓库，过长会挤占压缩后的上下文预算。
     const maxLen = 4000;
-    ctx.workingCheckpoint =
-        content.length <= maxLen ? content : content.substring(0, maxLen);
+    ctx.workingCheckpoint = clip(content, maxLen);
     return ToolResult('记事板已更新（${ctx.workingCheckpoint.length} 字）。');
   }
 }

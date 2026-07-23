@@ -10,6 +10,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:pdfrx/pdfrx.dart';
 import 'package:xml/xml.dart';
 
+import '../util/text_util.dart';
+import 'agent/model_client.dart';
 import 'settings_service.dart';
 
 /// 思维导图的展现形式。
@@ -375,7 +377,7 @@ class MindMapService extends ChangeNotifier {
     if (ext == '.pdf') return _pdfText(file);
     if (ext == '.docx') return _docxText(file);
     if (ext == '.txt' || ext == '.md' || ext == '.markdown') {
-      return _clip(await file.readAsString(), 16000);
+      return clip(await file.readAsString(), 16000);
     }
     throw Exception('暂不支持的格式：$ext（支持 pdf / docx / txt / md）');
   }
@@ -394,7 +396,7 @@ class MindMapService extends ChangeNotifier {
         if (full != null && full.isNotEmpty) sb.writeln(full);
         if (sb.length >= 16000) break;
       }
-      return _clip(sb.toString().trim(), 16000);
+      return clip(sb.toString().trim(), 16000);
     } finally {
       await doc?.dispose();
     }
@@ -417,7 +419,7 @@ class MindMapService extends ChangeNotifier {
           .trim();
       if (text.isNotEmpty) paragraphs.add(text);
     }
-    return _clip(paragraphs.join('\n'), 16000);
+    return clip(paragraphs.join('\n'), 16000);
   }
 
   // ---------------------------------------------------------------------------
@@ -484,31 +486,10 @@ $source''',
     }
   }
 
-  Future<String> _chat(List<Map<String, String>> messages) async {
-    const role = ModelRole.writing;
-    final client = _client = http.Client();
-    try {
-      final resp = await client.post(
-        Uri.parse('${settings.roleBaseUrl(role)}/chat/completions'),
-        headers: {
-          'Authorization': 'Bearer ${settings.roleApiKey(role)}',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'model': settings.roleModel(role),
-          'stream': false,
-          'messages': messages,
-        }),
-      );
-      if (resp.statusCode != 200) {
-        throw Exception('HTTP ${resp.statusCode} ${utf8.decode(resp.bodyBytes)}');
-      }
-      final json = jsonDecode(utf8.decode(resp.bodyBytes));
-      return (json['choices']?[0]?['message']?['content'] as String?) ?? '';
-    } finally {
-      client.close();
-      if (identical(_client, client)) _client = null;
-    }
+  /// 思维导图生成：统一走 [ModelClient] 的 writing 角色通道。
+  Future<String> _chat(List<Map<String, String>> messages) {
+    return ModelClient(settings, role: ModelRole.writing)
+        .complete(messages: messages);
   }
 
   /// 把预览 PNG 存到本地目录，文件名用记录 id（覆盖旧图）。返回路径。
@@ -523,9 +504,9 @@ $source''',
   String _titleFrom(String code, String src) {
     final root = _parseTree(code);
     final t = root?.label.trim() ?? '';
-    if (t.isNotEmpty && t != '思维导图') return _clip(t, 30);
+    if (t.isNotEmpty && t != '思维导图') return clip(t, 30);
     final firstLine = src.trim().split('\n').first.trim();
-    return firstLine.isEmpty ? '未命名导图' : _clip(firstLine, 30);
+    return firstLine.isEmpty ? '未命名导图' : clip(firstLine, 30);
   }
 
   Future<void> _persist() async {
@@ -535,8 +516,6 @@ $source''',
     );
   }
 
-  static String _clip(String value, int max) =>
-      value.length <= max ? value : value.substring(0, max);
 }
 
 /// 解析 mindmap 缩进结构时用到的临时树节点。

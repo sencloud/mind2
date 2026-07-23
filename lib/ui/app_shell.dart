@@ -6,6 +6,7 @@ import '../services/agent/memory/memory_service.dart';
 import '../services/book_service.dart';
 import '../services/chat_service.dart';
 import '../services/document_service.dart';
+import '../services/drawing_service.dart';
 import '../services/experiment_service.dart';
 import '../services/file_library_service.dart';
 import '../services/library_service.dart';
@@ -19,14 +20,17 @@ import '../services/project_service.dart';
 import '../services/promo_service.dart';
 import '../services/settings_service.dart';
 import '../services/topic_service.dart';
+import '../services/video_service.dart';
 import '../services/zotero_service.dart';
 import 'chat_page.dart';
+import 'drawing_page.dart';
 import 'knowledge_page.dart';
 import 'library_page.dart';
 import 'plan_page.dart';
 import 'project_page.dart';
 import 'settings_page.dart';
 import 'topic_page.dart';
+import 'video_page.dart';
 import 'writing_page.dart';
 
 class AppShell extends StatefulWidget {
@@ -49,6 +53,8 @@ class AppShell extends StatefulWidget {
     required this.book,
     required this.paper,
     required this.promo,
+    required this.drawing,
+    required this.video,
     required this.plan,
   });
 
@@ -69,6 +75,8 @@ class AppShell extends StatefulWidget {
   final BookService book;
   final PaperService paper;
   final PromoService promo;
+  final DrawingService drawing;
+  final VideoService video;
   final PlanService plan;
 
   @override
@@ -183,6 +191,8 @@ class _AppShellState extends State<AppShell> {
         initialTab: _writingTab,
       ),
       PlanPage(plan: widget.plan),
+      DrawingPage(drawing: widget.drawing),
+      VideoPage(video: widget.video),
     ];
 
     return Scaffold(
@@ -315,6 +325,20 @@ class _AppShellState extends State<AppShell> {
                 selected: _index == 6,
                 collapsed: compact,
                 onTap: () => setState(() => _index = 6),
+              ),
+              _NavItem(
+                icon: Icons.account_tree_outlined,
+                label: '画图',
+                selected: _index == 8,
+                collapsed: compact,
+                onTap: () => setState(() => _index = 8),
+              ),
+              _NavItem(
+                icon: Icons.movie_creation_outlined,
+                label: '视频',
+                selected: _index == 9,
+                collapsed: compact,
+                onTap: () => setState(() => _index = 9),
               ),
               _NavItem(
                 icon: Icons.code,

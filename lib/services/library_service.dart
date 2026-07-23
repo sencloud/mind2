@@ -1,11 +1,12 @@
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../models.dart';
+import '../util/text_util.dart';
 import 'agent/model_client.dart';
+import 'headless_browser.dart';
 import 'settings_service.dart';
 
 class LibraryService extends ChangeNotifier {
@@ -410,11 +411,8 @@ ${refs.isEmpty ? '（无）' : refs.toString()}
     return content;
   }
 
-  static String _clipForPrompt(String text, int maxLen) {
-    final clean = text.replaceAll(RegExp(r'\s+'), ' ').trim();
-    if (clean.length <= maxLen) return clean;
-    return '${clean.substring(0, maxLen)}…';
-  }
+  static String _clipForPrompt(String text, int maxLen) =>
+      clip(text.replaceAll(RegExp(r'\s+'), ' ').trim(), maxLen, suffix: '…');
 
   static String _metaLine(String frontmatter, String key) {
     final match = RegExp(
@@ -447,52 +445,8 @@ ${refs.isEmpty ? '（无）' : refs.toString()}
     );
   }
 
-  static const _browserCandidates = [
-    r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe',
-    r'C:\Program Files\Microsoft\Edge\Application\msedge.exe',
-    r'C:\Program Files\Google\Chrome\Application\chrome.exe',
-    r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
-  ];
-
-  static String? _browserPath() {
-    if (!Platform.isWindows) return null;
-    for (final path in _browserCandidates) {
-      if (File(path).existsSync()) return path;
-    }
-    return null;
-  }
-
-  static Future<void> _printHtmlToPdf(File html, File out) async {
-    final browser = _browserPath();
-    if (browser == null) throw Exception('未找到 Edge 或 Chrome，无法导出 PDF');
-    final tmp = await Directory.systemTemp.createTemp('mind_research_pdf_');
-    try {
-      final result = await Process.run(
-        browser,
-        [
-          '--headless=new',
-          '--disable-gpu',
-          '--no-sandbox',
-          '--user-data-dir=${tmp.path}',
-          '--print-to-pdf=${out.path}',
-          '--print-to-pdf-no-header',
-          '--no-pdf-header-footer',
-          html.uri.toString(),
-        ],
-        stdoutEncoding: utf8,
-        stderrEncoding: utf8,
-      ).timeout(const Duration(seconds: 60));
-      if (result.exitCode != 0 || !await out.exists()) {
-        throw Exception(
-          'PDF 导出失败：${(result.stderr as String?)?.trim() ?? result.exitCode}',
-        );
-      }
-    } finally {
-      try {
-        await tmp.delete(recursive: true);
-      } catch (_) {}
-    }
-  }
+  static Future<void> _printHtmlToPdf(File html, File out) =>
+      HeadlessBrowser.printPdf(html, out);
 
   static String _uniquePath(String path) {
     if (!File(path).existsSync()) return path;
@@ -507,11 +461,8 @@ ${refs.isEmpty ? '（无）' : refs.toString()}
     }
   }
 
-  static String _safeFileName(String value) {
-    var out = value.replaceAll(RegExp(r'[\\/:*?"<>|]'), ' ').trim();
-    if (out.length > 80) out = out.substring(0, 80).trim();
-    return out.isEmpty ? '主题研究报告' : out;
-  }
+  static String _safeFileName(String value) =>
+      sanitizeFileName(value, fallback: '主题研究报告');
 
   /// 为文件库中尚未建立笔记的文档创建标准笔记：AI 按文件名归入分类，
   /// 笔记带附件链接、正文为空模板（后续由批量生成补全内容）。返回新建数量。
@@ -572,10 +523,12 @@ ${titles.map((t) => '- $t').join('\n')}
       {'role': 'system', 'content': '你是知识管理专家，只输出 JSON。'},
       {'role': 'user', 'content': prompt},
     ], jsonMode: true);
-    final start = content.indexOf('{');
-    final end = content.lastIndexOf('}');
-    if (start < 0 || end <= start) throw Exception('模型未返回有效的分类结果');
-    final parsed = jsonDecode(content.substring(start, end + 1)) as Map;
+    final Map<String, dynamic> parsed;
+    try {
+      parsed = ModelClient.parseJsonObject(content);
+    } catch (_) {
+      throw Exception('模型未返回有效的分类结果');
+    }
     final out = <String, String>{};
     parsed.forEach((k, v) {
       out[k.toString().trim()] = v.toString().trim();
@@ -655,10 +608,7 @@ ${cats.map((c) => '- $c').join('\n')}
         {'role': 'system', 'content': '你是知识管理专家，只输出 JSON。'},
         {'role': 'user', 'content': prompt},
       ], jsonMode: true);
-      final start = content.indexOf('{');
-      final end = content.lastIndexOf('}');
-      if (start < 0 || end <= start) return {};
-      final parsed = jsonDecode(content.substring(start, end + 1)) as Map;
+      final parsed = ModelClient.parseJsonObject(content);
       final out = <String, String>{};
       parsed.forEach((k, v) {
         final from = k.toString();
